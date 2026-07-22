@@ -1,0 +1,534 @@
+/*@@author(-)*/
+/*@@version(1.0)*/
+
+/* ============================================================================
+   CAN GATEWAY  CAN1 <-> CAN2  +  SIMULATORE ERRORI  (Vector CANalyzer 19)
+   ============================================================================
+
+   FUNZIONI
+   --------
+   1) Gateway trasparente bidirezionale: ogni frame ricevuto su CAN1 viene
+      ritrasmesso su CAN2 e ogni frame ricevuto su CAN2 viene ritrasmesso su
+      CAN1 (copia byte-per-byte, non serve avere i segnali nel DBC per
+      inoltrare un frame: funziona per QUALSIASI ID).
+
+   2) Simulazione errori, attivabile A RUNTIME (a misurazione avviata) tramite
+      System Variables collegate ad un Panel:
+        - TIMEOUT           : il frame indicato smette di essere inoltrato
+                               (per una durata configurabile oppure a tempo
+                               indeterminato finché non si preme "Clear")
+        - DLC ERROR         : il frame indicato viene inoltrato con un DLC
+                               forzato/errato
+        - CHECKSUM ERROR    : il byte del segnale di checksum indicato viene
+                               invalidato (incrementato di 1) prima di essere
+                               inoltrato
+        - COUNTER ERROR     : il segnale message-counter indicato viene
+                               "congelato" (freeze, stesso valore ripetuto) o
+                               fatto "saltare" (jump, +2) per rompere la
+                               sequenza attesa dal ricevitore
+
+   CONFIGURAZIONE OBBLIGATORIA PRIMA DELL'USO
+   -------------------------------------------
+   CAPL non può leggere in automatico dal DBC caricato la posizione bit di un
+   segnale generico a runtime: va quindi compilata la "tabella frame/segnali"
+   nella funzione InitFrameTable() più sotto, con i frame e i segnali
+   (checksum / counter) del proprio progetto:
+       AddFrame(nome, ID);
+       AddSignal(ID, "NomeSegnale", byteIndex, bitStart, bitLen);
+   Gli esempi presenti vanno sostituiti/estesi con i frame reali.
+
+   NOMI RETE CAN1 / CAN2
+   ----------------------
+   Lo script assume che nella configurazione di CANalyzer le due reti si
+   chiamino "CAN1" e "CAN2" (sintassi "on message CAN1::*"). Se nel proprio
+   progetto i bus hanno un altro nome, sostituire i nomi nei due handler
+   "on message", oppure usare la variante alternativa commentata più sotto
+   basata su "this.can".
+
+   INPUT UTENTE: SYSTEM VARIABLES DA CREARE
+   ------------------------------------------
+   Creare in CANalyzer (finestra "System Variables" -> tasto destro ->
+   New Namespace "GatewaySim") le seguenti variabili:
+
+     Nome                          Tipo     Descrizione
+     ----------------------------  -------  --------------------------------
+     FrameIdentifier                String   Nome frame (es. "EngineData")
+                                             oppure ID (es. "0x100" o "256")
+     ChecksumSignalName              String   Nome segnale checksum (solo per
+                                             ErrorType = 2)
+     CounterSignalName               String   Nome segnale counter (solo per
+                                             ErrorType = 4 o 5)
+     TimeoutDuration_ms               Integer  Durata timeout in ms
+                                             (0 = indeterminato, fino a Clear)
+     DlcErrorValue                    Integer  DLC errato da forzare (0..8)
+     ErrorType                        Integer  0 = Nessuno
+                                             1 = Timeout
+                                             2 = Checksum error
+                                             3 = DLC error
+                                             4 = Counter error (freeze)
+                                             5 = Counter error (jump)
+     ApplyTrigger                     Integer  Incrementare/toggle da Panel
+                                             per applicare la simulazione
+     ClearTrigger                     Integer  Incrementare/toggle da Panel
+                                             per disattivare tutte le
+                                             simulazioni attive
+     StatusText                       String   Testo di stato (sola lettura,
+                                             scritto dallo script)
+
+   PANEL (Panel Designer)
+   ------------------------
+   Creare un Panel con:
+     - Edit box  -> FrameIdentifier
+     - Edit box  -> ChecksumSignalName
+     - Edit box  -> CounterSignalName
+     - Edit box (numerico) -> TimeoutDuration_ms
+     - Edit box (numerico) -> DlcErrorValue
+     - Combo box -> ErrorType (voci: None=0, Timeout=1, Checksum=2, DLC=3,
+       CounterFreeze=4, CounterJump=5)
+     - Pulsante  -> incrementa ApplyTrigger
+     - Pulsante  -> incrementa ClearTrigger
+     - Label     -> StatusText (sola visualizzazione)
+   ============================================================================ */
+
+variables
+{
+  /* ---------------- TABELLA FRAME (da configurare) ------------------------ */
+  const int kMaxFrames = 32;
+  char  gFrameName[32][51];
+  dword gFrameId[32];
+  int   gFrameCount;
+
+  /* ---------------- TABELLA SEGNALI checksum/counter (da configurare) ----- */
+  const int kMaxSignals = 64;
+  dword gSigFrameId[64];
+  char  gSigName[64][51];
+  byte  gSigByteIdx[64];   /* indice byte (0..7) del segnale nel frame       */
+  byte  gSigBitStart[64];  /* bit iniziale del segnale dentro il byte (0..7) */
+  byte  gSigBitLen[64];    /* lunghezza in bit del segnale                   */
+  int   gSigCount;
+
+  /* ---------------- STATO SIMULAZIONE: TIMEOUT ---------------------------- */
+  dword   gTimeoutActive  = 0;
+  long    gTimeoutFrameId = -1;
+  msTimer gTimeoutTimer;
+
+  /* ---------------- STATO SIMULAZIONE: DLC ERROR --------------------------- */
+  dword gDlcErrActive  = 0;
+  long  gDlcErrFrameId = -1;
+  byte  gDlcErrValue   = 0;
+
+  /* ---------------- STATO SIMULAZIONE: CHECKSUM ERROR ----------------------- */
+  dword gChkErrActive  = 0;
+  long  gChkErrFrameId = -1;
+  int   gChkErrSigIdx  = -1;
+
+  /* ---------------- STATO SIMULAZIONE: COUNTER ERROR ------------------------ */
+  dword gCntErrActive   = 0;
+  long  gCntErrFrameId  = -1;
+  int   gCntErrSigIdx   = -1;
+  dword gCntErrMode     = 0;  /* 0 = freeze, 1 = jump */
+  dword gCntFrozenValue = 0;
+  dword gCntFrozenValid = 0;
+}
+
+
+/* ============================================================================
+   INIZIALIZZAZIONE
+   ============================================================================ */
+
+on preStart
+{
+  gFrameCount = 0;
+  gSigCount   = 0;
+  InitFrameTable();
+  write("[Gateway] Inizializzato. Frame configurati: %d, Segnali configurati: %d",
+        gFrameCount, gSigCount);
+}
+
+void InitFrameTable()
+{
+  /* ESEMPI: sostituire con i frame/segnali reali del proprio DBC.
+     AddFrame(nome, ID);
+     AddSignal(ID, "NomeSegnale", byteIndex, bitStart, bitLen); */
+
+  AddFrame("EngineData", 0x100);
+  AddSignal(0x100, "Checksum", 7, 0, 8);   /* checksum su tutto il byte 7 */
+  AddSignal(0x100, "Counter",  0, 4, 4);   /* counter nibble alto del byte 0 */
+
+  AddFrame("BrakeStatus", 0x200);
+  AddSignal(0x200, "CRC",          6, 0, 8);
+  AddSignal(0x200, "AliveCounter", 0, 0, 4);
+
+  AddFrame("BodyControl", 0x300);
+  AddSignal(0x300, "Chk", 3, 0, 8);
+  AddSignal(0x300, "Cnt", 2, 4, 4);
+
+  /* -- aggiungere qui altri frame/segnali reali -- */
+}
+
+void AddFrame(char name[], dword id)
+{
+  if (gFrameCount >= kMaxFrames)
+  {
+    write("[Gateway] ATTENZIONE: tabella frame piena, aumentare kMaxFrames");
+    return;
+  }
+  strncpy(gFrameName[gFrameCount], name, elcount(gFrameName[gFrameCount]));
+  gFrameId[gFrameCount] = id;
+  gFrameCount = gFrameCount + 1;
+}
+
+void AddSignal(dword frameId, char name[], byte byteIdx, byte bitStart, byte bitLen)
+{
+  if (gSigCount >= kMaxSignals)
+  {
+    write("[Gateway] ATTENZIONE: tabella segnali piena, aumentare kMaxSignals");
+    return;
+  }
+  gSigFrameId[gSigCount] = frameId;
+  strncpy(gSigName[gSigCount], name, elcount(gSigName[gSigCount]));
+  gSigByteIdx[gSigCount]  = byteIdx;
+  gSigBitStart[gSigCount] = bitStart;
+  gSigBitLen[gSigCount]   = bitLen;
+  gSigCount = gSigCount + 1;
+}
+
+
+/* ============================================================================
+   GATEWAY CAN1 <-> CAN2
+   ============================================================================
+   NOTA: "this.dir == RX" e' fondamentale per evitare che il frame appena
+   ritrasmesso da questo stesso programma venga letto di nuovo come se fosse
+   in ingresso, generando un loop di inoltro CAN1->CAN2->CAN1->...
+   ============================================================================ */
+
+on message CAN1::*
+{
+  if (this.dir == RX)
+  {
+    ForwardFrame(this, 2);
+  }
+}
+
+on message CAN2::*
+{
+  if (this.dir == RX)
+  {
+    ForwardFrame(this, 1);
+  }
+}
+
+/* ALTERNATIVA, se le reti non si chiamano "CAN1"/"CAN2" nella propria
+   configurazione: rimuovere i due handler sopra e usare questo, basato sul
+   numero di canale fisico:
+
+on message *
+{
+  if (this.dir == RX)
+  {
+    if (this.can == 1)      ForwardFrame(this, 2);
+    else if (this.can == 2) ForwardFrame(this, 1);
+  }
+}
+*/
+
+void ForwardFrame(message inMsg, dword targetChannel)
+{
+  message txMsg;
+  int   i;
+  byte  cByte, cStart, cLen;
+  byte  rawByte;
+  dword curVal, newVal, maxVal;
+
+  /* ---- 1) TIMEOUT: il frame selezionato non viene inoltrato ---- */
+  if (gTimeoutActive == 1 && inMsg.id == gTimeoutFrameId)
+  {
+    return;
+  }
+
+  txMsg.id  = inMsg.id;
+  txMsg.dlc = inMsg.dlc;
+  txMsg.dir = TX;
+  txMsg.can = targetChannel;
+
+  for (i = 0; i < inMsg.dlc && i < 8; i = i + 1)
+  {
+    txMsg.byte(i) = inMsg.byte(i);
+  }
+
+  /* ---- 2) DLC ERROR: forza un DLC errato in uscita ---- */
+  if (gDlcErrActive == 1 && inMsg.id == gDlcErrFrameId)
+  {
+    txMsg.dlc = gDlcErrValue;
+  }
+
+  /* ---- 3) CHECKSUM ERROR: invalida il byte del segnale di checksum ---- */
+  if (gChkErrActive == 1 && inMsg.id == gChkErrFrameId && gChkErrSigIdx >= 0)
+  {
+    cByte = gSigByteIdx[gChkErrSigIdx];
+    txMsg.byte(cByte) = (inMsg.byte(cByte) + 1) & 0xFF;
+  }
+
+  /* ---- 4) COUNTER ERROR: freeze o jump del message counter ---- */
+  if (gCntErrActive == 1 && inMsg.id == gCntErrFrameId && gCntErrSigIdx >= 0)
+  {
+    cByte  = gSigByteIdx[gCntErrSigIdx];
+    cStart = gSigBitStart[gCntErrSigIdx];
+    cLen   = gSigBitLen[gCntErrSigIdx];
+    maxVal = (1 << cLen) - 1;
+
+    rawByte = inMsg.byte(cByte);
+    curVal  = ReadBits(rawByte, cStart, cLen);
+
+    if (gCntErrMode == 0)
+    {
+      /* freeze: congela il counter al primo valore osservato dopo l'attivazione */
+      if (gCntFrozenValid == 0)
+      {
+        gCntFrozenValue = curVal;
+        gCntFrozenValid = 1;
+      }
+      newVal = gCntFrozenValue;
+    }
+    else
+    {
+      /* jump: rompe la sequenza saltando 2 valori */
+      newVal = (curVal + 2) & maxVal;
+    }
+
+    txMsg.byte(cByte) = WriteBits(txMsg.byte(cByte), cStart, cLen, newVal);
+  }
+
+  output(txMsg);
+}
+
+dword ReadBits(byte b, byte startBit, byte len)
+{
+  dword mask;
+  mask = (1 << len) - 1;
+  return (b >> startBit) & mask;
+}
+
+byte WriteBits(byte b, byte startBit, byte len, dword value)
+{
+  dword mask;
+  mask = ((1 << len) - 1) << startBit;
+  return (b & ~mask) | ((value << startBit) & mask);
+}
+
+
+/* ============================================================================
+   RISOLUZIONE FRAME / SEGNALI da stringa utente
+   ============================================================================ */
+
+dword IsAllDigits(char s[])
+{
+  int i;
+  if (strlen(s) == 0)
+  {
+    return 0;
+  }
+  i = 0;
+  while (s[i] != 0)
+  {
+    if (s[i] < '0' || s[i] > '9')
+    {
+      return 0;
+    }
+    i = i + 1;
+  }
+  return 1;
+}
+
+dword IsNumericId(char ident[], long &idVal)
+{
+  long val;
+
+  if (strlen(ident) > 1 && ident[0] == '0' && (ident[1] == 'x' || ident[1] == 'X'))
+  {
+    if (sscanf(ident, "0x%x", val) == 1)
+    {
+      idVal = val;
+      return 1;
+    }
+    return 0;
+  }
+
+  if (IsAllDigits(ident) == 1)
+  {
+    sscanf(ident, "%d", val);
+    idVal = val;
+    return 1;
+  }
+
+  return 0;
+}
+
+int ResolveFrameIndex(char ident[])
+{
+  int  i;
+  long idVal;
+
+  if (IsNumericId(ident, idVal) == 1)
+  {
+    for (i = 0; i < gFrameCount; i = i + 1)
+    {
+      if (gFrameId[i] == idVal)
+      {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  for (i = 0; i < gFrameCount; i = i + 1)
+  {
+    if (stricmp(gFrameName[i], ident) == 0)
+    {
+      return i;
+    }
+  }
+  return -1;
+}
+
+int ResolveSignalIndex(dword frameId, char signalName[])
+{
+  int i;
+  for (i = 0; i < gSigCount; i = i + 1)
+  {
+    if (gSigFrameId[i] == frameId && stricmp(gSigName[i], signalName) == 0)
+    {
+      return i;
+    }
+  }
+  return -1;
+}
+
+
+/* ============================================================================
+   INPUT UTENTE (System Variables) -> ATTIVAZIONE / DISATTIVAZIONE ERRORI
+   ============================================================================ */
+
+on sysvar_update sysvar::GatewaySim::ApplyTrigger
+{
+  char ident[51];
+  char sigName[51];
+  int  fIdx;
+  int  sIdx;
+  int  errType;
+  long frameId;
+  char buf[200];
+
+  ident   = @sysvar::GatewaySim::FrameIdentifier;
+  errType = @sysvar::GatewaySim::ErrorType;
+
+  fIdx = ResolveFrameIndex(ident);
+  if (fIdx < 0)
+  {
+    snprintf(buf, elcount(buf), "ERRORE: frame non trovato: %s", ident);
+    @sysvar::GatewaySim::StatusText = buf;
+    write("[Gateway] %s", buf);
+    return;
+  }
+  frameId = gFrameId[fIdx];
+
+  switch (errType)
+  {
+    case 1: /* Timeout */
+      gTimeoutFrameId = frameId;
+      gTimeoutActive  = 1;
+      cancelTimer(gTimeoutTimer);
+      if (@sysvar::GatewaySim::TimeoutDuration_ms > 0)
+      {
+        setTimer(gTimeoutTimer, @sysvar::GatewaySim::TimeoutDuration_ms);
+      }
+      snprintf(buf, elcount(buf), "Timeout ATTIVO su %s (ID 0x%X)", ident, frameId);
+      break;
+
+    case 2: /* Checksum error */
+      sigName = @sysvar::GatewaySim::ChecksumSignalName;
+      sIdx = ResolveSignalIndex(frameId, sigName);
+      if (sIdx < 0)
+      {
+        snprintf(buf, elcount(buf), "ERRORE: segnale checksum non trovato: %s", sigName);
+        @sysvar::GatewaySim::StatusText = buf;
+        write("[Gateway] %s", buf);
+        return;
+      }
+      gChkErrFrameId = frameId;
+      gChkErrSigIdx  = sIdx;
+      gChkErrActive  = 1;
+      snprintf(buf, elcount(buf), "Errore CHECKSUM attivo su %s.%s", ident, sigName);
+      break;
+
+    case 3: /* DLC error */
+      gDlcErrFrameId = frameId;
+      gDlcErrValue   = (byte)@sysvar::GatewaySim::DlcErrorValue;
+      gDlcErrActive  = 1;
+      snprintf(buf, elcount(buf), "Errore DLC attivo su %s (DLC forzato a %d)", ident, gDlcErrValue);
+      break;
+
+    case 4: /* Counter error - freeze */
+    case 5: /* Counter error - jump */
+      sigName = @sysvar::GatewaySim::CounterSignalName;
+      sIdx = ResolveSignalIndex(frameId, sigName);
+      if (sIdx < 0)
+      {
+        snprintf(buf, elcount(buf), "ERRORE: segnale counter non trovato: %s", sigName);
+        @sysvar::GatewaySim::StatusText = buf;
+        write("[Gateway] %s", buf);
+        return;
+      }
+      gCntErrFrameId  = frameId;
+      gCntErrSigIdx   = sIdx;
+      gCntErrMode     = errType - 4; /* 0 = freeze, 1 = jump */
+      gCntFrozenValid = 0;
+      gCntErrActive   = 1;
+      if (gCntErrMode == 0)
+      {
+        snprintf(buf, elcount(buf), "Errore COUNTER (freeze) attivo su %s.%s", ident, sigName);
+      }
+      else
+      {
+        snprintf(buf, elcount(buf), "Errore COUNTER (jump) attivo su %s.%s", ident, sigName);
+      }
+      break;
+
+    default: /* 0 = Nessuno */
+      snprintf(buf, elcount(buf), "ErrorType = None, nessuna simulazione attivata");
+      break;
+  }
+
+  @sysvar::GatewaySim::StatusText = buf;
+  write("[Gateway] %s", buf);
+}
+
+on sysvar_update sysvar::GatewaySim::ClearTrigger
+{
+  gTimeoutActive  = 0;
+  gTimeoutFrameId = -1;
+  cancelTimer(gTimeoutTimer);
+
+  gDlcErrActive  = 0;
+  gDlcErrFrameId = -1;
+
+  gChkErrActive  = 0;
+  gChkErrFrameId = -1;
+  gChkErrSigIdx  = -1;
+
+  gCntErrActive   = 0;
+  gCntErrFrameId  = -1;
+  gCntErrSigIdx   = -1;
+  gCntFrozenValid = 0;
+
+  @sysvar::GatewaySim::StatusText = "Tutte le simulazioni di errore disattivate";
+  write("[Gateway] Simulazioni errore azzerate.");
+}
+
+on timer gTimeoutTimer
+{
+  gTimeoutActive  = 0;
+  gTimeoutFrameId = -1;
+  @sysvar::GatewaySim::StatusText = "Timeout terminato, forwarding ripristinato";
+  write("[Gateway] Timeout terminato, forwarding ripristinato.");
+}
