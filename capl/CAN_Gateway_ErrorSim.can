@@ -141,16 +141,6 @@ variables
      volta come variabile globale (l'ID iniziale 0x000 e' solo un placeholder,
      viene sovrascritto ad ogni forwarding con gTxMsg.id = ...). */
   message 0x000 gTxMsg;
-
-  /* ---------------- SYSTEM VARIABLES DI TIPO STRING ------------------------- */
-  /* La sintassi "@sysvar::Namespace::Var" funziona solo per system variable
-     numeriche (Int/Float). Per le variabili String vanno dichiarate qui come
-     variabili "tipizzate" legate alla system variable, e poi usate/assegnate
-     direttamente come normali char[] (senza "@"). */
-  sysvar::GatewaySim::FrameIdentifier    svFrameIdentifier;
-  sysvar::GatewaySim::ChecksumSignalName svChecksumSignalName;
-  sysvar::GatewaySim::CounterSignalName  svCounterSignalName;
-  sysvar::GatewaySim::StatusText         svStatusText;
 }
 
 
@@ -627,14 +617,14 @@ on sysvar_update sysvar::GatewaySim::ApplyTrigger
   long frameId;
   char buf[200];
 
-  ident   = svFrameIdentifier;
+  ident   = sysvar::GatewaySim::FrameIdentifier;
   errType = @sysvar::GatewaySim::ErrorType;
 
   fIdx = ResolveFrameIndex(ident);
   if (fIdx < 0)
   {
     snprintf(buf, elcount(buf), "ERRORE: frame non trovato: %s", ident);
-    svStatusText = buf;
+    sysvar::GatewaySim::StatusText = buf;
     write("[Gateway] %s", buf);
     return;
   }
@@ -654,12 +644,12 @@ on sysvar_update sysvar::GatewaySim::ApplyTrigger
       break;
 
     case 2: /* Checksum error */
-      sigName = svChecksumSignalName;
+      sigName = sysvar::GatewaySim::ChecksumSignalName;
       sIdx = ResolveSignalIndex(frameId, sigName);
       if (sIdx < 0)
       {
         snprintf(buf, elcount(buf), "ERRORE: segnale checksum non trovato: %s", sigName);
-        svStatusText = buf;
+        sysvar::GatewaySim::StatusText = buf;
         write("[Gateway] %s", buf);
         return;
       }
@@ -678,12 +668,12 @@ on sysvar_update sysvar::GatewaySim::ApplyTrigger
 
     case 4: /* Counter error - freeze */
     case 5: /* Counter error - jump */
-      sigName = svCounterSignalName;
+      sigName = sysvar::GatewaySim::CounterSignalName;
       sIdx = ResolveSignalIndex(frameId, sigName);
       if (sIdx < 0)
       {
         snprintf(buf, elcount(buf), "ERRORE: segnale counter non trovato: %s", sigName);
-        svStatusText = buf;
+        sysvar::GatewaySim::StatusText = buf;
         write("[Gateway] %s", buf);
         return;
       }
@@ -707,7 +697,7 @@ on sysvar_update sysvar::GatewaySim::ApplyTrigger
       break;
   }
 
-  svStatusText = buf;
+  sysvar::GatewaySim::StatusText = buf;
   write("[Gateway] %s", buf);
 }
 
@@ -729,7 +719,7 @@ on sysvar_update sysvar::GatewaySim::ClearTrigger
   gCntErrSigIdx   = -1;
   gCntFrozenValid = 0;
 
-  svStatusText = "Tutte le simulazioni di errore disattivate";
+  sysvar::GatewaySim::StatusText = "Tutte le simulazioni di errore disattivate";
   write("[Gateway] Simulazioni errore azzerate.");
 }
 
@@ -737,6 +727,6 @@ on timer gTimeoutTimer
 {
   gTimeoutActive  = 0;
   gTimeoutFrameId = -1;
-  svStatusText = "Timeout terminato, forwarding ripristinato";
+  sysvar::GatewaySim::StatusText = "Timeout terminato, forwarding ripristinato";
   write("[Gateway] Timeout terminato, forwarding ripristinato.");
 }
