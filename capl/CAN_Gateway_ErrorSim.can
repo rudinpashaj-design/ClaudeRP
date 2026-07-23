@@ -27,15 +27,19 @@
                                fatto "saltare" (jump, +2) per rompere la
                                sequenza attesa dal ricevitore
 
-   CONFIGURAZIONE OBBLIGATORIA PRIMA DELL'USO
-   -------------------------------------------
+   CONFIGURAZIONE FRAME / SEGNALI
+   -------------------------------
    CAPL non può leggere in automatico dal DBC caricato la posizione bit di un
-   segnale generico a runtime: va quindi compilata la "tabella frame/segnali"
-   nella funzione InitFrameTable() più sotto, con i frame e i segnali
-   (checksum / counter) del proprio progetto:
+   segnale generico a runtime: la tabella frame/segnali in InitFrameTable()
+   deve quindi essere precompilata. La tabella qui sotto è già stata generata
+   dal DBC "CAN_HS1_AEE2010_R3_B2.2_K0_EURO6eBIS_V7.4.dbc" (52 frame: 23
+   trasmessi dal nodo CMM su CAN1, 29 dagli altri nodi su CAN2), con byte
+   index / bit start / bit length dei segnali CHKSUM_* e CPT_PROCESS_4B_*
+   calcolati per encoding empirico direttamente dal DBC (vedi commenti dentro
+   InitFrameTable() per le due esclusioni e la nota su COMPTEUR_RAZ_GCT).
+   Se il DBC cambia, la tabella va rigenerata di conseguenza:
        AddFrame(nome, ID);
        AddSignal(ID, "NomeSegnale", byteIndex, bitStart, bitLen);
-   Gli esempi presenti vanno sostituiti/estesi con i frame reali.
 
    NOMI RETE CAN1 / CAN2
    ----------------------
@@ -93,18 +97,18 @@
 variables
 {
   /* ---------------- TABELLA FRAME (da configurare) ------------------------ */
-  const int kMaxFrames = 32;
-  char  gFrameName[32][51];
-  dword gFrameId[32];
+  const int kMaxFrames = 64;
+  char  gFrameName[64][51];
+  dword gFrameId[64];
   int   gFrameCount;
 
   /* ---------------- TABELLA SEGNALI checksum/counter (da configurare) ----- */
-  const int kMaxSignals = 64;
-  dword gSigFrameId[64];
-  char  gSigName[64][51];
-  byte  gSigByteIdx[64];   /* indice byte (0..7) del segnale nel frame       */
-  byte  gSigBitStart[64];  /* bit iniziale del segnale dentro il byte (0..7) */
-  byte  gSigBitLen[64];    /* lunghezza in bit del segnale                   */
+  const int kMaxSignals = 48;
+  dword gSigFrameId[48];
+  char  gSigName[48][51];
+  byte  gSigByteIdx[48];   /* indice byte (0..7) del segnale nel frame       */
+  byte  gSigBitStart[48];  /* bit iniziale del segnale dentro il byte (0..7) */
+  byte  gSigBitLen[48];    /* lunghezza in bit del segnale                   */
   int   gSigCount;
 
   /* ---------------- STATO SIMULAZIONE: TIMEOUT ---------------------------- */
@@ -147,23 +151,155 @@ on preStart
 
 void InitFrameTable()
 {
-  /* ESEMPI: sostituire con i frame/segnali reali del proprio DBC.
-     AddFrame(nome, ID);
-     AddSignal(ID, "NomeSegnale", byteIndex, bitStart, bitLen); */
+  /* ============================================================
+     Tabella generata da: CAN_HS1_AEE2010_R3_B2.2_K0_EURO6eBIS_V7.4.dbc
+     52 frame totali (23 trasmessi da CMM -> CAN1, 29 da altri nodi -> CAN2).
+     Byte index / bit start / bit length dei segnali CHKSUM_* e CPT_PROCESS_4B_*
+     calcolati per encoding empirico (bit-a-bit) direttamente dal DBC, quindi
+     corretti indipendentemente dal byte order (Motorola) usato nel file.
 
-  AddFrame("EngineData", 0x100);
-  AddSignal(0x100, "Checksum", 7, 0, 8);   /* checksum su tutto il byte 7 */
-  AddSignal(0x100, "Counter",  0, 4, 4);   /* counter nibble alto del byte 0 */
+     NOTE:
+      - CPT_NBR_REDEM (CMM_1E8, 16 bit) e CPT_TEMPOREL (V2_BSI_552, 32 bit)
+        NON sono stati aggiunti: sono contatori "gestionali" (n. riavvii /
+        tempo trascorso), non rolling counter di frame su singolo byte, quindi
+        non adatti alla simulazione errore counter frame-per-frame.
+      - COMPTEUR_RAZ_GCT (V2_BSI_552) e' un contatore a 8 bit isolabile in un
+        byte, ma dal nome sembra un contatore di reset/eventi GCT piuttosto
+        che un vero rolling counter di frescatura frame: verificare se e'
+        il segnale giusto prima di usarlo per simulare errori counter.
+     ============================================================ */
 
-  AddFrame("BrakeStatus", 0x200);
-  AddSignal(0x200, "CRC",          6, 0, 8);
-  AddSignal(0x200, "AliveCounter", 0, 0, 4);
+  AddFrame("IMMO_CMM_BSI_072", 0x72);
 
-  AddFrame("BodyControl", 0x300);
-  AddSignal(0x300, "Chk", 3, 0, 8);
-  AddSignal(0x300, "Cnt", 2, 4, 4);
+  AddFrame("ELECTRON_BSI_092", 0x92);
 
-  /* -- aggiungere qui altri frame/segnali reali -- */
+  AddFrame("IMMO_BSI_CMM_0A8", 0xA8);
+
+  AddFrame("IMMO_UCC_CMM_0E0", 0xE0);
+
+  AddFrame("IMMO_CMM_UCC_0E8", 0xE8);
+
+  AddFrame("VERS_CMM_108", 0x108);
+
+  AddFrame("CMM_1E8", 0x1E8);
+  /* CPT_NBR_REDEM (16 bit) non aggiunto: vedi nota sopra */
+
+  AddFrame("CMM_208", 0x208);
+
+  AddFrame("VOL_305", 0x305);
+  AddSignal(0x305, "CHKSUM_VOL", 4, 4, 4);
+  AddSignal(0x305, "CPT_PROCESS_4B_A_VOL", 4, 0, 4);
+
+  AddFrame("FRE_30D", 0x30D);
+
+  AddFrame("CMM_348", 0x348);
+
+  AddFrame("V2_BVA_349", 0x349);
+  AddSignal(0x349, "CHKSUM_TRME_DYN_V2_349", 6, 4, 4);
+  AddSignal(0x349, "CPT_PROCESS_4B_V2_349", 6, 0, 4);
+
+  AddFrame("CDS_V2_34D", 0x34D);
+  AddSignal(0x34D, "CHKSUM_FRAME_4B_34D", 4, 0, 4);
+  AddSignal(0x34D, "CPT_PROCESS_4B_ESP", 5, 0, 4);
+
+  AddFrame("CMM_388", 0x388);
+
+  AddFrame("ABR_38D", 0x38D);
+  AddSignal(0x38D, "CPT_PROCESS_4B_38D", 5, 4, 4);
+  AddSignal(0x38D, "CHKSUM_TRME_DYN_UC_FREIN", 5, 0, 4);
+
+  AddFrame("SI_EASY_MOVE_3AD", 0x3AD);
+  AddSignal(0x3AD, "CPT_PROCESS_4B_EASY_MOVE_ESP", 7, 4, 4);
+  AddSignal(0x3AD, "CHKSUM_TRME_DYN_EASY_MOVE_ESP", 7, 0, 4);
+
+  AddFrame("V2_BV_3C9", 0x3C9);
+  AddSignal(0x3C9, "CHKSUM_TRME_DYN_V2_3C9", 3, 4, 4);
+  AddSignal(0x3C9, "CPT_PROCESS_4B_V2_3C9", 3, 0, 4);
+
+  AddFrame("FRE_3CD", 0x3CD);
+  AddSignal(0x3CD, "CHKSUM_TRAME_4B_3CD", 7, 4, 4);
+  AddSignal(0x3CD, "CPT_PROCESS_4B_3CD", 7, 0, 4);
+
+  AddFrame("BSI_412", 0x412);
+
+  AddFrame("BSI_432", 0x432);
+  AddSignal(0x432, "CPT_PROCESS_4B_BSI_1", 1, 0, 4);
+
+  AddFrame("ABR_44D", 0x44D);
+
+  AddFrame("CMM_468", 0x468);
+
+  AddFrame("V2_BV_489", 0x489);
+
+  AddFrame("BDE_VIN_VDS_BSI_492", 0x492);
+
+  AddFrame("DIRA_495", 0x495);
+  AddSignal(0x495, "CHKSUM_TRAME_4B_495", 4, 4, 4);
+  AddSignal(0x495, "CPT_PROCESS_4B_495", 4, 0, 4);
+
+  AddFrame("CRASH_4C8", 0x4C8);
+
+  AddFrame("BV_4E9", 0x4E9);
+  AddSignal(0x4E9, "CPT_PROCESS_4B_4E9", 1, 4, 4);
+  AddSignal(0x4E9, "CHKSUM_TRAME_4B_4E9", 1, 0, 4);
+
+  AddFrame("CMM_4F8", 0x4F8);
+  AddSignal(0x4F8, "CHKSUM_TRAME_4B_4F8", 2, 4, 4);
+  AddSignal(0x4F8, "CPT_PROCESS_4B_4F8", 2, 0, 4);
+
+  AddFrame("ABR_50D", 0x50D);
+  AddSignal(0x50D, "CPT_PROCESS_4B_50D", 7, 4, 4);
+  AddSignal(0x50D, "CHKSUM_TRME_DAT_UC_FREIN", 7, 0, 4);
+
+  AddFrame("V2_BSI_552", 0x552);
+  AddSignal(0x552, "COMPTEUR_RAZ_GCT", 7, 0, 8); /* vedi nota sopra */
+  /* CPT_TEMPOREL (32 bit) non aggiunto: vedi nota sopra */
+
+  AddFrame("NEW_JDD_55F", 0x55F);
+
+  AddFrame("BSI_56E", 0x56E);
+  AddSignal(0x56E, "CPT_PROCESS_4B_56E", 4, 4, 4);
+  AddSignal(0x56E, "CHKSUM_FRAME_4B_56E", 4, 0, 4);
+
+  AddFrame("BSI_572", 0x572);
+
+  AddFrame("CMM_588", 0x588);
+
+  AddFrame("CMM_598", 0x598);
+
+  AddFrame("CONTEXTE_1_5B2", 0x5B2);
+
+  AddFrame("CMM_5F8", 0x5F8);
+
+  AddFrame("EOBD_CMM_608", 0x608);
+
+  AddFrame("BSI_612", 0x612);
+
+  AddFrame("REP_DIAG_ON_CAN_688", 0x688);
+
+  AddFrame("REQ_DIAG_ON_CAN_6A8", 0x6A8);
+
+  AddFrame("NEW_JDD_CMM_768", 0x768);
+
+  AddFrame("SUPV_V2_CMM_788", 0x788);
+
+  AddFrame("IS_MAP_CMM_7A8", 0x7A8);
+
+  AddFrame("OUTIL_PRTCLE_CCP_7CC", 0x7CC);
+
+  AddFrame("OUTIL_PRTCLE_CCP_7CD", 0x7CD);
+
+  AddFrame("OUTIL_PRTCLE_CCP_7CE", 0x7CE);
+
+  AddFrame("OUTIL_PRTCLE_CCP_7CF", 0x7CF);
+
+  AddFrame("REQ_EOBD_ON_CAN_V2_7DF", 0x7DF);
+
+  AddFrame("REQ_EOBD_ON_CAN_7E0", 0x7E0);
+
+  AddFrame("REP_EOBD_ON_CAN_7E8", 0x7E8);
+
+  AddFrame("UDS_ON_CAN_7FF", 0x7FF);
 }
 
 void AddFrame(char name[], dword id)
