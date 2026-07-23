@@ -148,6 +148,14 @@ variables
      volta come variabile globale (l'ID iniziale 0x000 e' solo un placeholder,
      viene sovrascritto ad ogni forwarding con gTxMsg.id = ...). */
   message 0x000 gTxMsg;
+
+  /* Guard di rientranza: se "on message *" venisse invocato di nuovo
+     (sincronamente) per il frame che stiamo appena ritrasmettendo con
+     output(), questo flag lo blocca prima che diventi un loop di
+     inoltro CAN1->CAN2->CAN1->... Non sostituisce una configurazione
+     corretta dei canali (vedi commenti nell'header), ma e' una
+     protezione aggiuntiva indipendente da "this.dir". */
+  dword gInForward = 0;
 }
 
 
@@ -286,6 +294,11 @@ on message *
     return;
   }
 
+  if (gInForward == 1)
+  {
+    return;
+  }
+
   if (this.can == 1)
   {
     targetChannel = 2;
@@ -360,7 +373,9 @@ on message *
     gTxMsg.byte(cByte) = WriteBits(gTxMsg.byte(cByte), cStart, cLen, newVal);
   }
 
+  gInForward = 1;
   output(gTxMsg);
+  gInForward = 0;
 }
 
 dword ReadBits(byte b, byte startBit, byte len)
