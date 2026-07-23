@@ -41,13 +41,14 @@
        AddFrame(nome, ID);
        AddSignal(ID, "NomeSegnale", byteIndex, bitStart, bitLen);
 
-   NOMI RETE CAN1 / CAN2
-   ----------------------
-   Lo script assume che nella configurazione di CANalyzer le due reti si
-   chiamino "CAN1" e "CAN2" (sintassi "on message CAN1::*"). Se nel proprio
-   progetto i bus hanno un altro nome, sostituire i nomi nei due handler
-   "on message", oppure usare la variante alternativa commentata più sotto
-   basata su "this.can".
+   CANALI CAN1 / CAN2
+   -------------------
+   Il gateway usa un unico handler "on message *" e smista i frame in base al
+   canale fisico (this.can == 1 oppure 2), NON in base al nome della rete: il
+   nodo CAPL nel Simulation Setup deve essere collegato sia al canale 1 sia
+   al canale 2 nella Channel Mapping della configurazione. Se nel proprio
+   progetto CAN1/CAN2 corrispondono a numeri di canale diversi da 1 e 2,
+   aggiornare i valori confrontati con "this.can" nell'handler.
 
    INPUT UTENTE: SYSTEM VARIABLES DA CREARE
    ------------------------------------------
@@ -133,6 +134,23 @@ variables
   dword gCntErrMode     = 0;  /* 0 = freeze, 1 = jump */
   dword gCntFrozenValue = 0;
   dword gCntFrozenValid = 0;
+
+  /* ---------------- MESSAGGIO GENERICO RIUSABILE PER IL FORWARDING ---------- */
+  /* In CAPL un oggetto "message" non puo' essere passato come parametro di
+     funzione ne' dichiarato come variabile locale: va dichiarato una sola
+     volta come variabile globale (l'ID iniziale 0x000 e' solo un placeholder,
+     viene sovrascritto ad ogni forwarding con gTxMsg.id = ...). */
+  message 0x000 gTxMsg;
+
+  /* ---------------- SYSTEM VARIABLES DI TIPO STRING ------------------------- */
+  /* La sintassi "@sysvar::Namespace::Var" funziona solo per system variable
+     numeriche (Int/Float). Per le variabili String vanno dichiarate qui come
+     variabili "tipizzate" legate alla system variable, e poi usate/assegnate
+     direttamente come normali char[] (senza "@"). */
+  sysvar::GatewaySim::FrameIdentifier    svFrameIdentifier;
+  sysvar::GatewaySim::ChecksumSignalName svChecksumSignalName;
+  sysvar::GatewaySim::CounterSignalName  svCounterSignalName;
+  sysvar::GatewaySim::StatusText         svStatusText;
 }
 
 
@@ -338,82 +356,76 @@ void AddSignal(dword frameId, char name[], byte byteIdx, byte bitStart, byte bit
    in ingresso, generando un loop di inoltro CAN1->CAN2->CAN1->...
    ============================================================================ */
 
-on message CAN1::*
-{
-  if (this.dir == RX)
-  {
-    ForwardFrame(this, 2);
-  }
-}
-
-on message CAN2::*
-{
-  if (this.dir == RX)
-  {
-    ForwardFrame(this, 1);
-  }
-}
-
-/* ALTERNATIVA, se le reti non si chiamano "CAN1"/"CAN2" nella propria
-   configurazione: rimuovere i due handler sopra e usare questo, basato sul
-   numero di canale fisico:
-
+/* NOTA: un unico handler generico "on message *" che smista in base al
+   canale fisico (this.can). Non si usano ne' "on message CAN1::*" ne'
+   funzioni con parametri di tipo "message": in CAPL un oggetto message non
+   e' un tipo valido per parametri di funzione o variabili locali, quindi
+   tutta la logica di forwarding/error-injection resta dentro l'handler e
+   scrive sull'unico oggetto globale gTxMsg. */
 on message *
 {
-  if (this.dir == RX)
-  {
-    if (this.can == 1)      ForwardFrame(this, 2);
-    else if (this.can == 2) ForwardFrame(this, 1);
-  }
-}
-*/
-
-void ForwardFrame(message inMsg, dword targetChannel)
-{
-  message txMsg;
   int   i;
+  dword targetChannel;
   byte  cByte, cStart, cLen;
   byte  rawByte;
   dword curVal, newVal, maxVal;
 
-  /* ---- 1) TIMEOUT: il frame selezionato non viene inoltrato ---- */
-  if (gTimeoutActive == 1 && inMsg.id == gTimeoutFrameId)
+  if (this.dir != RX)
   {
     return;
   }
 
-  txMsg.id  = inMsg.id;
-  txMsg.dlc = inMsg.dlc;
-  txMsg.dir = TX;
-  txMsg.can = targetChannel;
-
-  for (i = 0; i < inMsg.dlc && i < 8; i = i + 1)
+  if (this.can == 1)
   {
-    txMsg.byte(i) = inMsg.byte(i);
+    targetChannel = 2;
+  }
+  else if (this.can == 2)
+  {
+    targetChannel = 1;
+  }
+  else
+  {
+    return;
+  }
+
+  /* ---- 1) TIMEOUT: il frame selezionato non viene inoltrato ---- */
+  if (gTimeoutActive == 1 && this.id == gTimeoutFrameId)
+  {
+    return;
+  }
+
+  gTxMsg.id  = this.id;
+  gTxMsg.dlc = this.dlc;
+  gTxMsg.dir = TX;
+  gTxMsg.can = targetChannel;
+
+  for (i = 0; i < this.dlc && i < 8; i = i + 1)
+  {
+    gTxMsg.byte(i) = this.byte(i);
   }
 
   /* ---- 2) DLC ERROR: forza un DLC errato in uscita ---- */
-  if (gDlcErrActive == 1 && inMsg.id == gDlcErrFrameId)
+  if (gDlcErrActive == 1 && this.id == gDlcErrFrameId)
   {
-    txMsg.dlc = gDlcErrValue;
+    gTxMsg.dlc = gDlcErrValue;
   }
 
   /* ---- 3) CHECKSUM ERROR: invalida il byte del segnale di checksum ---- */
-  if (gChkErrActive == 1 && inMsg.id == gChkErrFrameId && gChkErrSigIdx >= 0)
+  if (gChkErrActive == 1 && this.id == gChkErrFrameId && gChkErrSigIdx >= 0)
   {
     cByte = gSigByteIdx[gChkErrSigIdx];
-    txMsg.byte(cByte) = (inMsg.byte(cByte) + 1) & 0xFF;
+    gTxMsg.byte(cByte) = (this.byte(cByte) + 1) & 0xFF;
   }
 
   /* ---- 4) COUNTER ERROR: freeze o jump del message counter ---- */
-  if (gCntErrActive == 1 && inMsg.id == gCntErrFrameId && gCntErrSigIdx >= 0)
+  if (gCntErrActive == 1 && this.id == gCntErrFrameId && gCntErrSigIdx >= 0)
   {
     cByte  = gSigByteIdx[gCntErrSigIdx];
     cStart = gSigBitStart[gCntErrSigIdx];
     cLen   = gSigBitLen[gCntErrSigIdx];
     maxVal = (1 << cLen) - 1;
 
-    rawByte = inMsg.byte(cByte);
+    rawByte = this.byte(cByte);
     curVal  = ReadBits(rawByte, cStart, cLen);
 
     if (gCntErrMode == 0)
@@ -432,10 +444,10 @@ void ForwardFrame(message inMsg, dword targetChannel)
       newVal = (curVal + 2) & maxVal;
     }
 
-    txMsg.byte(cByte) = WriteBits(txMsg.byte(cByte), cStart, cLen, newVal);
+    gTxMsg.byte(cByte) = WriteBits(gTxMsg.byte(cByte), cStart, cLen, newVal);
   }
 
-  output(txMsg);
+  output(gTxMsg);
 }
 
 dword ReadBits(byte b, byte startBit, byte len)
@@ -476,23 +488,83 @@ dword IsAllDigits(char s[])
   return 1;
 }
 
+byte ToUpperChar(byte c)
+{
+  if (c >= 'a' && c <= 'z')
+  {
+    return c - 'a' + 'A';
+  }
+  return c;
+}
+
+/* Confronto stringhe case-insensitive (sostituisce stricmp, non disponibile
+   in questo ambiente CAPL): ritorna 1 se uguali, 0 altrimenti. */
+dword StrEqualNoCase(char a[], char b[])
+{
+  int i;
+  int len;
+
+  len = strlen(a);
+  if (len != strlen(b))
+  {
+    return 0;
+  }
+  for (i = 0; i < len; i = i + 1)
+  {
+    if (ToUpperChar(a[i]) != ToUpperChar(b[i]))
+    {
+      return 0;
+    }
+  }
+  return 1;
+}
+
+/* Parsing manuale di ID decimale/esadecimale (sostituisce sscanf, non
+   disponibile in questo ambiente CAPL). Accetta "0x..."/"0X..." oppure una
+   stringa di sole cifre decimali. */
 dword IsNumericId(char ident[], long &idVal)
 {
   long val;
+  int  i;
+  int  len;
+  byte c;
 
-  if (strlen(ident) > 1 && ident[0] == '0' && (ident[1] == 'x' || ident[1] == 'X'))
+  len = strlen(ident);
+  if (len == 0)
   {
-    if (sscanf(ident, "0x%x", val) == 1)
-    {
-      idVal = val;
-      return 1;
-    }
     return 0;
+  }
+
+  if (len > 2 && ident[0] == '0' && (ident[1] == 'x' || ident[1] == 'X'))
+  {
+    val = 0;
+    for (i = 2; i < len; i = i + 1)
+    {
+      c = ToUpperChar(ident[i]);
+      if (c >= '0' && c <= '9')
+      {
+        val = val * 16 + (c - '0');
+      }
+      else if (c >= 'A' && c <= 'F')
+      {
+        val = val * 16 + (c - 'A' + 10);
+      }
+      else
+      {
+        return 0;
+      }
+    }
+    idVal = val;
+    return 1;
   }
 
   if (IsAllDigits(ident) == 1)
   {
-    sscanf(ident, "%d", val);
+    val = 0;
+    for (i = 0; i < len; i = i + 1)
+    {
+      val = val * 10 + (ident[i] - '0');
+    }
     idVal = val;
     return 1;
   }
@@ -519,7 +591,7 @@ int ResolveFrameIndex(char ident[])
 
   for (i = 0; i < gFrameCount; i = i + 1)
   {
-    if (stricmp(gFrameName[i], ident) == 0)
+    if (StrEqualNoCase(gFrameName[i], ident) == 1)
     {
       return i;
     }
@@ -532,7 +604,7 @@ int ResolveSignalIndex(dword frameId, char signalName[])
   int i;
   for (i = 0; i < gSigCount; i = i + 1)
   {
-    if (gSigFrameId[i] == frameId && stricmp(gSigName[i], signalName) == 0)
+    if (gSigFrameId[i] == frameId && StrEqualNoCase(gSigName[i], signalName) == 1)
     {
       return i;
     }
@@ -555,14 +627,14 @@ on sysvar_update sysvar::GatewaySim::ApplyTrigger
   long frameId;
   char buf[200];
 
-  ident   = @sysvar::GatewaySim::FrameIdentifier;
+  ident   = svFrameIdentifier;
   errType = @sysvar::GatewaySim::ErrorType;
 
   fIdx = ResolveFrameIndex(ident);
   if (fIdx < 0)
   {
     snprintf(buf, elcount(buf), "ERRORE: frame non trovato: %s", ident);
-    @sysvar::GatewaySim::StatusText = buf;
+    svStatusText = buf;
     write("[Gateway] %s", buf);
     return;
   }
@@ -582,12 +654,12 @@ on sysvar_update sysvar::GatewaySim::ApplyTrigger
       break;
 
     case 2: /* Checksum error */
-      sigName = @sysvar::GatewaySim::ChecksumSignalName;
+      sigName = svChecksumSignalName;
       sIdx = ResolveSignalIndex(frameId, sigName);
       if (sIdx < 0)
       {
         snprintf(buf, elcount(buf), "ERRORE: segnale checksum non trovato: %s", sigName);
-        @sysvar::GatewaySim::StatusText = buf;
+        svStatusText = buf;
         write("[Gateway] %s", buf);
         return;
       }
@@ -606,12 +678,12 @@ on sysvar_update sysvar::GatewaySim::ApplyTrigger
 
     case 4: /* Counter error - freeze */
     case 5: /* Counter error - jump */
-      sigName = @sysvar::GatewaySim::CounterSignalName;
+      sigName = svCounterSignalName;
       sIdx = ResolveSignalIndex(frameId, sigName);
       if (sIdx < 0)
       {
         snprintf(buf, elcount(buf), "ERRORE: segnale counter non trovato: %s", sigName);
-        @sysvar::GatewaySim::StatusText = buf;
+        svStatusText = buf;
         write("[Gateway] %s", buf);
         return;
       }
@@ -635,7 +707,7 @@ on sysvar_update sysvar::GatewaySim::ApplyTrigger
       break;
   }
 
-  @sysvar::GatewaySim::StatusText = buf;
+  svStatusText = buf;
   write("[Gateway] %s", buf);
 }
 
@@ -657,7 +729,7 @@ on sysvar_update sysvar::GatewaySim::ClearTrigger
   gCntErrSigIdx   = -1;
   gCntFrozenValid = 0;
 
-  @sysvar::GatewaySim::StatusText = "Tutte le simulazioni di errore disattivate";
+  svStatusText = "Tutte le simulazioni di errore disattivate";
   write("[Gateway] Simulazioni errore azzerate.");
 }
 
@@ -665,6 +737,6 @@ on timer gTimeoutTimer
 {
   gTimeoutActive  = 0;
   gTimeoutFrameId = -1;
-  @sysvar::GatewaySim::StatusText = "Timeout terminato, forwarding ripristinato";
+  svStatusText = "Timeout terminato, forwarding ripristinato";
   write("[Gateway] Timeout terminato, forwarding ripristinato.");
 }
