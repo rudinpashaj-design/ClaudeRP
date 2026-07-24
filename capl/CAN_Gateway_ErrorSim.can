@@ -111,6 +111,7 @@ variables
   const int kMaxFrames = 64;
   char  gFrameName[64][51];
   dword gFrameId[64];
+  byte  gFrameOriginCan[64]; /* 1 = origine CAN1 (CMM), 2 = origine CAN2 (altri) */
   byte  gChkByteIdx[64];
   byte  gChkBitStart[64];
   byte  gChkBitLen[64];    /* 0 = nessun checksum su questo frame */
@@ -175,7 +176,14 @@ void InitFrameTable()
   /* ============================================================
      Tabella generata da: CAN_HS1_AEE2010_R3_B2.2_K0_EURO6eBIS_V7.4.dbc
      52 frame totali (23 trasmessi da CMM -> CAN1, 29 da altri nodi -> CAN2).
-     Parametri: AddFrame(nome, ID, chkByte, chkBit, chkLen, cntByte, cntBit, cntLen)
+     Parametri: AddFrame(nome, ID, originCan, chkByte, chkBit, chkLen, cntByte, cntBit, cntLen)
+     originCan = 1 se il frame e' nativo di CAN1 (trasmesso da CMM), 2 se e'
+     nativo di CAN2 (trasmesso da un altro nodo). Usato per NON ri-trasmettere
+     un frame sul bus dove ha gia' origine (vedi handler "on message *"):
+     senza questo controllo, un frame che rientra per errore/eco sul canale
+     sbagliato verrebbe rimandato sul suo stesso bus di origine, creando due
+     trasmettitori per lo stesso ID e causando errori NACK / bus-off sul
+     controller CAN reale.
      chkLen/cntLen = 0 significa "nessun segnale di quel tipo su questo frame".
      Byte index / bit start / bit length calcolati per encoding empirico
      (bit-a-bit) direttamente dal DBC, quindi corretti indipendentemente dal
@@ -192,61 +200,61 @@ void InitFrameTable()
         giusto prima di usarlo per simulare errori counter.
      ============================================================ */
 
-  AddFrame("IMMO_CMM_BSI_072", 0x72, 0, 0, 0, 0, 0, 0);
-  AddFrame("ELECTRON_BSI_092", 0x92, 0, 0, 0, 0, 0, 0);
-  AddFrame("IMMO_BSI_CMM_0A8", 0xA8, 0, 0, 0, 0, 0, 0);
-  AddFrame("IMMO_UCC_CMM_0E0", 0xE0, 0, 0, 0, 0, 0, 0);
-  AddFrame("IMMO_CMM_UCC_0E8", 0xE8, 0, 0, 0, 0, 0, 0);
-  AddFrame("VERS_CMM_108", 0x108, 0, 0, 0, 0, 0, 0);
-  AddFrame("CMM_1E8", 0x1E8, 0, 0, 0, 0, 0, 0); /* CPT_NBR_REDEM non aggiunto: vedi nota sopra */
-  AddFrame("CMM_208", 0x208, 0, 0, 0, 0, 0, 0);
-  AddFrame("VOL_305", 0x305, 4, 4, 4, 4, 0, 4);
-  AddFrame("FRE_30D", 0x30D, 0, 0, 0, 0, 0, 0);
-  AddFrame("CMM_348", 0x348, 0, 0, 0, 0, 0, 0);
-  AddFrame("V2_BVA_349", 0x349, 6, 4, 4, 6, 0, 4);
-  AddFrame("CDS_V2_34D", 0x34D, 4, 0, 4, 5, 0, 4);
-  AddFrame("CMM_388", 0x388, 0, 0, 0, 0, 0, 0);
-  AddFrame("ABR_38D", 0x38D, 5, 0, 4, 5, 4, 4);
-  AddFrame("SI_EASY_MOVE_3AD", 0x3AD, 7, 0, 4, 7, 4, 4);
-  AddFrame("V2_BV_3C9", 0x3C9, 3, 4, 4, 3, 0, 4);
-  AddFrame("FRE_3CD", 0x3CD, 7, 4, 4, 7, 0, 4);
-  AddFrame("BSI_412", 0x412, 0, 0, 0, 0, 0, 0);
-  AddFrame("BSI_432", 0x432, 0, 0, 0, 1, 0, 4);
-  AddFrame("ABR_44D", 0x44D, 0, 0, 0, 0, 0, 0);
-  AddFrame("CMM_468", 0x468, 0, 0, 0, 0, 0, 0);
-  AddFrame("V2_BV_489", 0x489, 0, 0, 0, 0, 0, 0);
-  AddFrame("BDE_VIN_VDS_BSI_492", 0x492, 0, 0, 0, 0, 0, 0);
-  AddFrame("DIRA_495", 0x495, 4, 4, 4, 4, 0, 4);
-  AddFrame("CRASH_4C8", 0x4C8, 0, 0, 0, 0, 0, 0);
-  AddFrame("BV_4E9", 0x4E9, 1, 0, 4, 1, 4, 4);
-  AddFrame("CMM_4F8", 0x4F8, 2, 4, 4, 2, 0, 4);
-  AddFrame("ABR_50D", 0x50D, 7, 0, 4, 7, 4, 4);
-  AddFrame("V2_BSI_552", 0x552, 0, 0, 0, 7, 0, 8); /* COMPTEUR_RAZ_GCT: vedi nota sopra. CPT_TEMPOREL (32 bit) non aggiunto */
-  AddFrame("NEW_JDD_55F", 0x55F, 0, 0, 0, 0, 0, 0);
-  AddFrame("BSI_56E", 0x56E, 4, 0, 4, 4, 4, 4);
-  AddFrame("BSI_572", 0x572, 0, 0, 0, 0, 0, 0);
-  AddFrame("CMM_588", 0x588, 0, 0, 0, 0, 0, 0);
-  AddFrame("CMM_598", 0x598, 0, 0, 0, 0, 0, 0);
-  AddFrame("CONTEXTE_1_5B2", 0x5B2, 0, 0, 0, 0, 0, 0);
-  AddFrame("CMM_5F8", 0x5F8, 0, 0, 0, 0, 0, 0);
-  AddFrame("EOBD_CMM_608", 0x608, 0, 0, 0, 0, 0, 0);
-  AddFrame("BSI_612", 0x612, 0, 0, 0, 0, 0, 0);
-  AddFrame("REP_DIAG_ON_CAN_688", 0x688, 0, 0, 0, 0, 0, 0);
-  AddFrame("REQ_DIAG_ON_CAN_6A8", 0x6A8, 0, 0, 0, 0, 0, 0);
-  AddFrame("NEW_JDD_CMM_768", 0x768, 0, 0, 0, 0, 0, 0);
-  AddFrame("SUPV_V2_CMM_788", 0x788, 0, 0, 0, 0, 0, 0);
-  AddFrame("IS_MAP_CMM_7A8", 0x7A8, 0, 0, 0, 0, 0, 0);
-  AddFrame("OUTIL_PRTCLE_CCP_7CC", 0x7CC, 0, 0, 0, 0, 0, 0);
-  AddFrame("OUTIL_PRTCLE_CCP_7CD", 0x7CD, 0, 0, 0, 0, 0, 0);
-  AddFrame("OUTIL_PRTCLE_CCP_7CE", 0x7CE, 0, 0, 0, 0, 0, 0);
-  AddFrame("OUTIL_PRTCLE_CCP_7CF", 0x7CF, 0, 0, 0, 0, 0, 0);
-  AddFrame("REQ_EOBD_ON_CAN_V2_7DF", 0x7DF, 0, 0, 0, 0, 0, 0);
-  AddFrame("REQ_EOBD_ON_CAN_7E0", 0x7E0, 0, 0, 0, 0, 0, 0);
-  AddFrame("REP_EOBD_ON_CAN_7E8", 0x7E8, 0, 0, 0, 0, 0, 0);
-  AddFrame("UDS_ON_CAN_7FF", 0x7FF, 0, 0, 0, 0, 0, 0);
+  AddFrame("IMMO_CMM_BSI_072", 0x72, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("ELECTRON_BSI_092", 0x92, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("IMMO_BSI_CMM_0A8", 0xA8, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("IMMO_UCC_CMM_0E0", 0xE0, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("IMMO_CMM_UCC_0E8", 0xE8, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("VERS_CMM_108", 0x108, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("CMM_1E8", 0x1E8, 1, 0, 0, 0, 0, 0, 0); /* CPT_NBR_REDEM non aggiunto: vedi nota sopra */
+  AddFrame("CMM_208", 0x208, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("VOL_305", 0x305, 2, 4, 4, 4, 4, 0, 4);
+  AddFrame("FRE_30D", 0x30D, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("CMM_348", 0x348, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("V2_BVA_349", 0x349, 2, 6, 4, 4, 6, 0, 4);
+  AddFrame("CDS_V2_34D", 0x34D, 2, 4, 0, 4, 5, 0, 4);
+  AddFrame("CMM_388", 0x388, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("ABR_38D", 0x38D, 2, 5, 0, 4, 5, 4, 4);
+  AddFrame("SI_EASY_MOVE_3AD", 0x3AD, 2, 7, 0, 4, 7, 4, 4);
+  AddFrame("V2_BV_3C9", 0x3C9, 2, 3, 4, 4, 3, 0, 4);
+  AddFrame("FRE_3CD", 0x3CD, 2, 7, 4, 4, 7, 0, 4);
+  AddFrame("BSI_412", 0x412, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("BSI_432", 0x432, 2, 0, 0, 0, 1, 0, 4);
+  AddFrame("ABR_44D", 0x44D, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("CMM_468", 0x468, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("V2_BV_489", 0x489, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("BDE_VIN_VDS_BSI_492", 0x492, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("DIRA_495", 0x495, 2, 4, 4, 4, 4, 0, 4);
+  AddFrame("CRASH_4C8", 0x4C8, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("BV_4E9", 0x4E9, 2, 1, 0, 4, 1, 4, 4);
+  AddFrame("CMM_4F8", 0x4F8, 1, 2, 4, 4, 2, 0, 4);
+  AddFrame("ABR_50D", 0x50D, 2, 7, 0, 4, 7, 4, 4);
+  AddFrame("V2_BSI_552", 0x552, 2, 0, 0, 0, 7, 0, 8); /* COMPTEUR_RAZ_GCT: vedi nota sopra. CPT_TEMPOREL (32 bit) non aggiunto */
+  AddFrame("NEW_JDD_55F", 0x55F, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("BSI_56E", 0x56E, 2, 4, 0, 4, 4, 4, 4);
+  AddFrame("BSI_572", 0x572, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("CMM_588", 0x588, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("CMM_598", 0x598, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("CONTEXTE_1_5B2", 0x5B2, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("CMM_5F8", 0x5F8, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("EOBD_CMM_608", 0x608, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("BSI_612", 0x612, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("REP_DIAG_ON_CAN_688", 0x688, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("REQ_DIAG_ON_CAN_6A8", 0x6A8, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("NEW_JDD_CMM_768", 0x768, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("SUPV_V2_CMM_788", 0x788, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("IS_MAP_CMM_7A8", 0x7A8, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("OUTIL_PRTCLE_CCP_7CC", 0x7CC, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("OUTIL_PRTCLE_CCP_7CD", 0x7CD, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("OUTIL_PRTCLE_CCP_7CE", 0x7CE, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("OUTIL_PRTCLE_CCP_7CF", 0x7CF, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("REQ_EOBD_ON_CAN_V2_7DF", 0x7DF, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("REQ_EOBD_ON_CAN_7E0", 0x7E0, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("REP_EOBD_ON_CAN_7E8", 0x7E8, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("UDS_ON_CAN_7FF", 0x7FF, 1, 0, 0, 0, 0, 0, 0);
 }
 
-void AddFrame(char name[], dword id, byte chkByte, byte chkBit, byte chkLen,
+void AddFrame(char name[], dword id, byte originCan, byte chkByte, byte chkBit, byte chkLen,
               byte cntByte, byte cntBit, byte cntLen)
 {
   if (gFrameCount >= kMaxFrames)
@@ -255,13 +263,14 @@ void AddFrame(char name[], dword id, byte chkByte, byte chkBit, byte chkLen,
     return;
   }
   strncpy(gFrameName[gFrameCount], name, elcount(gFrameName[gFrameCount]));
-  gFrameId[gFrameCount]     = id;
-  gChkByteIdx[gFrameCount]  = chkByte;
-  gChkBitStart[gFrameCount] = chkBit;
-  gChkBitLen[gFrameCount]   = chkLen;
-  gCntByteIdx[gFrameCount]  = cntByte;
-  gCntBitStart[gFrameCount] = cntBit;
-  gCntBitLen[gFrameCount]   = cntLen;
+  gFrameId[gFrameCount]         = id;
+  gFrameOriginCan[gFrameCount]  = originCan;
+  gChkByteIdx[gFrameCount]      = chkByte;
+  gChkBitStart[gFrameCount]     = chkBit;
+  gChkBitLen[gFrameCount]       = chkLen;
+  gCntByteIdx[gFrameCount]      = cntByte;
+  gCntBitStart[gFrameCount]     = cntBit;
+  gCntBitLen[gFrameCount]       = cntLen;
   gFrameCount = gFrameCount + 1;
 }
 
@@ -308,6 +317,18 @@ on message *
     targetChannel = 1;
   }
   else
+  {
+    return;
+  }
+
+  /* ---- 0) ANTI-ECO: un frame CONOSCIUTO non va ritrasmesso sul bus dove ha
+     gia' origine nativa (es. un frame di CAN2 rientrato per errore/eco su
+     CAN1 non deve essere rimandato su CAN2, dove il vero trasmettitore lo
+     sta gia' inviando: altrimenti si hanno due sorgenti per lo stesso ID e
+     il controller CAN reale va in errore/NACK/bus-off). I frame non presenti
+     in tabella vengono comunque sempre inoltrati (gateway generico). ---- */
+  fIdx = ResolveFrameIndexById(this.id);
+  if (fIdx >= 0 && gFrameOriginCan[fIdx] != this.can)
   {
     return;
   }
