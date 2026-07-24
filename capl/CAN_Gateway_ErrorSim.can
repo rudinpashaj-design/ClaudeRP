@@ -111,7 +111,15 @@ variables
   const int kMaxFrames = 64;
   char  gFrameName[64][51];
   dword gFrameId[64];
-  byte  gFrameOriginCan[64]; /* 1 = origine CAN1 (CMM), 2 = origine CAN2 (altri) */
+  /* 1 = origine canale fisico 1, 2 = origine canale fisico 2. ATTENZIONE:
+     in questa configurazione CANalyzer il canale 2 e' quello dove CMM
+     trasmette nativamente (CMM_xxx) e il canale 1 e' quello dove tutti gli
+     altri nodi (BSI, UC_FREIN, BV, ...) trasmettono nativamente - verificato
+     dalla traccia bus reale, quindi INVERTITO rispetto alla convenzione
+     "CAN1=CMM/CAN2=altri" descritta a parole nell'header. Se si ricollega il
+     nodo CAPL a canali diversi, questi valori vanno riverificati dalla
+     traccia (Trace window) prima di fidarsi del filtro anti-eco sotto. */
+  byte  gFrameOriginCan[64];
   byte  gChkByteIdx[64];
   byte  gChkBitStart[64];
   byte  gChkBitLen[64];    /* 0 = nessun checksum su questo frame */
@@ -200,58 +208,58 @@ void InitFrameTable()
         giusto prima di usarlo per simulare errori counter.
      ============================================================ */
 
-  AddFrame("IMMO_CMM_BSI_072", 0x72, 1, 0, 0, 0, 0, 0, 0);
-  AddFrame("ELECTRON_BSI_092", 0x92, 2, 0, 0, 0, 0, 0, 0);
-  AddFrame("IMMO_BSI_CMM_0A8", 0xA8, 2, 0, 0, 0, 0, 0, 0);
-  AddFrame("IMMO_UCC_CMM_0E0", 0xE0, 2, 0, 0, 0, 0, 0, 0);
-  AddFrame("IMMO_CMM_UCC_0E8", 0xE8, 1, 0, 0, 0, 0, 0, 0);
-  AddFrame("VERS_CMM_108", 0x108, 1, 0, 0, 0, 0, 0, 0);
-  AddFrame("CMM_1E8", 0x1E8, 1, 0, 0, 0, 0, 0, 0); /* CPT_NBR_REDEM non aggiunto: vedi nota sopra */
-  AddFrame("CMM_208", 0x208, 1, 0, 0, 0, 0, 0, 0);
-  AddFrame("VOL_305", 0x305, 2, 4, 4, 4, 4, 0, 4);
-  AddFrame("FRE_30D", 0x30D, 2, 0, 0, 0, 0, 0, 0);
-  AddFrame("CMM_348", 0x348, 1, 0, 0, 0, 0, 0, 0);
-  AddFrame("V2_BVA_349", 0x349, 2, 6, 4, 4, 6, 0, 4);
-  AddFrame("CDS_V2_34D", 0x34D, 2, 4, 0, 4, 5, 0, 4);
-  AddFrame("CMM_388", 0x388, 1, 0, 0, 0, 0, 0, 0);
-  AddFrame("ABR_38D", 0x38D, 2, 5, 0, 4, 5, 4, 4);
-  AddFrame("SI_EASY_MOVE_3AD", 0x3AD, 2, 7, 0, 4, 7, 4, 4);
-  AddFrame("V2_BV_3C9", 0x3C9, 2, 3, 4, 4, 3, 0, 4);
-  AddFrame("FRE_3CD", 0x3CD, 2, 7, 4, 4, 7, 0, 4);
-  AddFrame("BSI_412", 0x412, 2, 0, 0, 0, 0, 0, 0);
-  AddFrame("BSI_432", 0x432, 2, 0, 0, 0, 1, 0, 4);
-  AddFrame("ABR_44D", 0x44D, 2, 0, 0, 0, 0, 0, 0);
-  AddFrame("CMM_468", 0x468, 1, 0, 0, 0, 0, 0, 0);
-  AddFrame("V2_BV_489", 0x489, 2, 0, 0, 0, 0, 0, 0);
-  AddFrame("BDE_VIN_VDS_BSI_492", 0x492, 2, 0, 0, 0, 0, 0, 0);
-  AddFrame("DIRA_495", 0x495, 2, 4, 4, 4, 4, 0, 4);
-  AddFrame("CRASH_4C8", 0x4C8, 2, 0, 0, 0, 0, 0, 0);
-  AddFrame("BV_4E9", 0x4E9, 2, 1, 0, 4, 1, 4, 4);
-  AddFrame("CMM_4F8", 0x4F8, 1, 2, 4, 4, 2, 0, 4);
-  AddFrame("ABR_50D", 0x50D, 2, 7, 0, 4, 7, 4, 4);
-  AddFrame("V2_BSI_552", 0x552, 2, 0, 0, 0, 7, 0, 8); /* COMPTEUR_RAZ_GCT: vedi nota sopra. CPT_TEMPOREL (32 bit) non aggiunto */
-  AddFrame("NEW_JDD_55F", 0x55F, 2, 0, 0, 0, 0, 0, 0);
-  AddFrame("BSI_56E", 0x56E, 2, 4, 0, 4, 4, 4, 4);
-  AddFrame("BSI_572", 0x572, 2, 0, 0, 0, 0, 0, 0);
-  AddFrame("CMM_588", 0x588, 1, 0, 0, 0, 0, 0, 0);
-  AddFrame("CMM_598", 0x598, 1, 0, 0, 0, 0, 0, 0);
-  AddFrame("CONTEXTE_1_5B2", 0x5B2, 2, 0, 0, 0, 0, 0, 0);
-  AddFrame("CMM_5F8", 0x5F8, 1, 0, 0, 0, 0, 0, 0);
-  AddFrame("EOBD_CMM_608", 0x608, 1, 0, 0, 0, 0, 0, 0);
-  AddFrame("BSI_612", 0x612, 2, 0, 0, 0, 0, 0, 0);
-  AddFrame("REP_DIAG_ON_CAN_688", 0x688, 1, 0, 0, 0, 0, 0, 0);
-  AddFrame("REQ_DIAG_ON_CAN_6A8", 0x6A8, 2, 0, 0, 0, 0, 0, 0);
-  AddFrame("NEW_JDD_CMM_768", 0x768, 1, 0, 0, 0, 0, 0, 0);
-  AddFrame("SUPV_V2_CMM_788", 0x788, 1, 0, 0, 0, 0, 0, 0);
-  AddFrame("IS_MAP_CMM_7A8", 0x7A8, 1, 0, 0, 0, 0, 0, 0);
-  AddFrame("OUTIL_PRTCLE_CCP_7CC", 0x7CC, 1, 0, 0, 0, 0, 0, 0);
-  AddFrame("OUTIL_PRTCLE_CCP_7CD", 0x7CD, 1, 0, 0, 0, 0, 0, 0);
-  AddFrame("OUTIL_PRTCLE_CCP_7CE", 0x7CE, 1, 0, 0, 0, 0, 0, 0);
-  AddFrame("OUTIL_PRTCLE_CCP_7CF", 0x7CF, 1, 0, 0, 0, 0, 0, 0);
-  AddFrame("REQ_EOBD_ON_CAN_V2_7DF", 0x7DF, 2, 0, 0, 0, 0, 0, 0);
-  AddFrame("REQ_EOBD_ON_CAN_7E0", 0x7E0, 2, 0, 0, 0, 0, 0, 0);
-  AddFrame("REP_EOBD_ON_CAN_7E8", 0x7E8, 1, 0, 0, 0, 0, 0, 0);
-  AddFrame("UDS_ON_CAN_7FF", 0x7FF, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("IMMO_CMM_BSI_072", 0x72, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("ELECTRON_BSI_092", 0x92, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("IMMO_BSI_CMM_0A8", 0xA8, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("IMMO_UCC_CMM_0E0", 0xE0, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("IMMO_CMM_UCC_0E8", 0xE8, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("VERS_CMM_108", 0x108, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("CMM_1E8", 0x1E8, 2, 0, 0, 0, 0, 0, 0); /* CPT_NBR_REDEM non aggiunto: vedi nota sopra */
+  AddFrame("CMM_208", 0x208, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("VOL_305", 0x305, 1, 4, 4, 4, 4, 0, 4);
+  AddFrame("FRE_30D", 0x30D, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("CMM_348", 0x348, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("V2_BVA_349", 0x349, 1, 6, 4, 4, 6, 0, 4);
+  AddFrame("CDS_V2_34D", 0x34D, 1, 4, 0, 4, 5, 0, 4);
+  AddFrame("CMM_388", 0x388, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("ABR_38D", 0x38D, 1, 5, 0, 4, 5, 4, 4);
+  AddFrame("SI_EASY_MOVE_3AD", 0x3AD, 1, 7, 0, 4, 7, 4, 4);
+  AddFrame("V2_BV_3C9", 0x3C9, 1, 3, 4, 4, 3, 0, 4);
+  AddFrame("FRE_3CD", 0x3CD, 1, 7, 4, 4, 7, 0, 4);
+  AddFrame("BSI_412", 0x412, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("BSI_432", 0x432, 1, 0, 0, 0, 1, 0, 4);
+  AddFrame("ABR_44D", 0x44D, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("CMM_468", 0x468, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("V2_BV_489", 0x489, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("BDE_VIN_VDS_BSI_492", 0x492, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("DIRA_495", 0x495, 1, 4, 4, 4, 4, 0, 4);
+  AddFrame("CRASH_4C8", 0x4C8, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("BV_4E9", 0x4E9, 1, 1, 0, 4, 1, 4, 4);
+  AddFrame("CMM_4F8", 0x4F8, 2, 2, 4, 4, 2, 0, 4);
+  AddFrame("ABR_50D", 0x50D, 1, 7, 0, 4, 7, 4, 4);
+  AddFrame("V2_BSI_552", 0x552, 1, 0, 0, 0, 7, 0, 8); /* COMPTEUR_RAZ_GCT: vedi nota sopra. CPT_TEMPOREL (32 bit) non aggiunto */
+  AddFrame("NEW_JDD_55F", 0x55F, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("BSI_56E", 0x56E, 1, 4, 0, 4, 4, 4, 4);
+  AddFrame("BSI_572", 0x572, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("CMM_588", 0x588, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("CMM_598", 0x598, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("CONTEXTE_1_5B2", 0x5B2, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("CMM_5F8", 0x5F8, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("EOBD_CMM_608", 0x608, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("BSI_612", 0x612, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("REP_DIAG_ON_CAN_688", 0x688, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("REQ_DIAG_ON_CAN_6A8", 0x6A8, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("NEW_JDD_CMM_768", 0x768, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("SUPV_V2_CMM_788", 0x788, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("IS_MAP_CMM_7A8", 0x7A8, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("OUTIL_PRTCLE_CCP_7CC", 0x7CC, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("OUTIL_PRTCLE_CCP_7CD", 0x7CD, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("OUTIL_PRTCLE_CCP_7CE", 0x7CE, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("OUTIL_PRTCLE_CCP_7CF", 0x7CF, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("REQ_EOBD_ON_CAN_V2_7DF", 0x7DF, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("REQ_EOBD_ON_CAN_7E0", 0x7E0, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("REP_EOBD_ON_CAN_7E8", 0x7E8, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("UDS_ON_CAN_7FF", 0x7FF, 2, 0, 0, 0, 0, 0, 0);
 }
 
 void AddFrame(char name[], dword id, byte originCan, byte chkByte, byte chkBit, byte chkLen,
