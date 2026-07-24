@@ -123,6 +123,15 @@ variables
   byte  gChkByteIdx[64];
   byte  gChkBitStart[64];
   byte  gChkBitLen[64];    /* 0 = nessun checksum su questo frame */
+  /* Valore target del checksum a somma (vedi ComputeChecksumNibble sotto):
+     255 = algoritmo non validato per questo frame (checksum lasciato
+     "invalidato" come effetto collaterale, comportamento precedente),
+     0..15 = costante determinata per reverse engineering dalla traccia
+     reale (somma di tutti i nibble del frame deve fare questa costante
+     mod 16). Permette di ricalcolare un checksum VALIDO dopo aver
+     alterato il counter, cosi' la simulazione errore counter non genera
+     anche un falso errore checksum. */
+  byte  gChkTarget[64];
   byte  gCntByteIdx[64];
   byte  gCntBitStart[64];
   byte  gCntBitLen[64];    /* 0 = nessun counter su questo frame */
@@ -260,6 +269,28 @@ void InitFrameTable()
   AddFrame("REQ_EOBD_ON_CAN_7E0", 0x7E0, 1, 0, 0, 0, 0, 0, 0);
   AddFrame("REP_EOBD_ON_CAN_7E8", 0x7E8, 2, 0, 0, 0, 0, 0, 0);
   AddFrame("UDS_ON_CAN_7FF", 0x7FF, 2, 0, 0, 0, 0, 0, 0);
+
+  /* ============================================================
+     Costanti target del checksum a somma, determinate per reverse
+     engineering dalla traccia reale "Diagnositc_Trace_HS1__T001.asc":
+     per questi frame, la somma di TUTTI i nibble dell'intero frame
+     (checksum e counter inclusi) e' costante e pari al target indicato,
+     verificato con ZERO incongruenze su centinaia/migliaia di frame
+     reali distinti per ciascun ID. Permette di ricalcolare un checksum
+     valido dopo aver alterato il counter (vedi ComputeChecksumNibble()).
+
+     VOL_305, BV_4E9 e BSI_56E NON seguono questa formula (probabilmente
+     un algoritmo diverso, es. un vero CRC polinomiale): restano senza
+     target (255), quindi per loro il checksum viene solo invalidato
+     "a forza" come prima, senza possibilita' di ricalcolo valido.
+     ============================================================ */
+  SetChkTarget(0x349, 6);
+  SetChkTarget(0x34D, 11);
+  SetChkTarget(0x38D, 7);
+  SetChkTarget(0x3C9, 14);
+  SetChkTarget(0x3CD, 3);
+  SetChkTarget(0x495, 13);
+  SetChkTarget(0x50D, 12);
 }
 
 void AddFrame(char name[], dword id, byte originCan, byte chkByte, byte chkBit, byte chkLen,
@@ -276,10 +307,28 @@ void AddFrame(char name[], dword id, byte originCan, byte chkByte, byte chkBit, 
   gChkByteIdx[gFrameCount]      = chkByte;
   gChkBitStart[gFrameCount]     = chkBit;
   gChkBitLen[gFrameCount]       = chkLen;
+  gChkTarget[gFrameCount]       = 255; /* default: algoritmo non validato, vedi SetChkTarget() */
   gCntByteIdx[gFrameCount]      = cntByte;
   gCntBitStart[gFrameCount]     = cntBit;
   gCntBitLen[gFrameCount]       = cntLen;
   gFrameCount = gFrameCount + 1;
+}
+
+/* Imposta la costante target del checksum a somma per un frame gia'
+   aggiunto con AddFrame(), determinata per reverse engineering da una
+   traccia bus reale (vedi commento su gChkTarget). Va chiamata dopo il
+   corrispondente AddFrame() nella tabella. */
+void SetChkTarget(dword id, byte target)
+{
+  int i;
+  for (i = 0; i < gFrameCount; i = i + 1)
+  {
+    if (gFrameId[i] == id)
+    {
+      gChkTarget[i] = target;
+      return;
+    }
+  }
 }
 
 
@@ -400,6 +449,16 @@ on message *
     }
 
     gTxMsg.byte(cByte) = WriteBits(gTxMsg.byte(cByte), cStart, cLen, newVal);
+
+    /* Se per questo frame l'algoritmo di checksum e' stato validato
+       (vedi SetChkTarget in InitFrameTable), ricalcola un checksum
+       VALIDO per il counter appena alterato, cosi' il ricevitore
+       segnala solo l'errore di counter/freschezza e non anche un falso
+       errore di checksum come effetto collaterale. */
+    if (gChkBitLen[fIdx] > 0 && gChkTarget[fIdx] != 255)
+    {
+      RecomputeChecksum(fIdx);
+    }
   }
 
   gInForward = 1;
@@ -419,6 +478,65 @@ byte WriteBits(byte b, byte startBit, byte len, dword value)
   dword mask;
   mask = ((1 << len) - 1) << startBit;
   return (b & ~mask) | ((value << startBit) & mask);
+}
+
+/* Somma tutti i nibble di gTxMsg (sui primi gTxMsg.dlc byte) tranne il
+   nibble di checksum a (exceptByte, exceptBitStart): serve per
+   ricalcolare il checksum a somma (vedi RecomputeChecksum). Assume che
+   il checksum occupi un intero nibble allineato (bitStart 0 oppure 4,
+   lunghezza 4), vero per tutti i frame con gChkTarget valido. */
+dword SumAllNibblesExceptChecksum(byte exceptByte, byte exceptBitStart)
+{
+  dword sum;
+  int   i;
+  byte  b;
+
+  sum = 0;
+  for (i = 0; i < gTxMsg.dlc && i < 8; i = i + 1)
+  {
+    b = gTxMsg.byte(i);
+    if (i == exceptByte)
+    {
+      if (exceptBitStart == 0)
+      {
+        sum = sum + ((b >> 4) & 0xF);
+      }
+      else
+      {
+        sum = sum + (b & 0xF);
+      }
+    }
+    else
+    {
+      sum = sum + ((b >> 4) & 0xF) + (b & 0xF);
+    }
+  }
+  return sum;
+}
+
+/* Ricalcola e scrive in gTxMsg un checksum VALIDO per il frame fIdx,
+   secondo l'algoritmo "somma a costante" determinato per reverse
+   engineering (vedi gChkTarget / SetChkTarget): la somma di tutti i
+   nibble del frame deve essere pari a gChkTarget[fIdx] modulo 16. */
+void RecomputeChecksum(int fIdx)
+{
+  byte cByte, cStart;
+  dword sumOther;
+  long  diff;
+  byte  newNibble;
+
+  cByte  = gChkByteIdx[fIdx];
+  cStart = gChkBitStart[fIdx];
+
+  sumOther = SumAllNibblesExceptChecksum(cByte, cStart);
+  diff = (long)gChkTarget[fIdx] - (long)(sumOther % 16);
+  if (diff < 0)
+  {
+    diff = diff + 16;
+  }
+  newNibble = diff;
+
+  gTxMsg.byte(cByte) = WriteBits(gTxMsg.byte(cByte), cStart, 4, newNibble);
 }
 
 
