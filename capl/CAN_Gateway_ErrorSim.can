@@ -188,6 +188,31 @@ on preStart
   write("[Gateway] Inizializzato. Frame configurati: %d", gFrameCount);
 }
 
+/* Prima operazione allo start della misura: forza il segnale
+   REVEIL_PRINCIPAL (byte0 bit6-7 del frame 0x432, BSI_432) al valore 2
+   ("Main wake up request" nel DBC) e lo invia forzatamente su CAN1,
+   indipendentemente da cosa arrivi/sia presente su CAN2 - serve per far
+   partire il wake-up della CMM. Tutti gli altri byte/segnali del frame
+   sono azzerati: se la CMM richiede anche altri campi coerenti in
+   questo stesso frame per accettare il wake-up, vanno aggiunti qui. */
+on start
+{
+  int i;
+
+  for (i = 0; i < 8; i = i + 1)
+  {
+    gTxMsg.byte(i) = 0;
+  }
+  gTxMsg.id  = 0x432;
+  gTxMsg.dlc = 8;
+  gTxMsg.dir = TX;
+  gTxMsg.can = 1;
+  gTxMsg.byte(0) = 0x80; /* REVEIL_PRINCIPAL (bit6-7 di byte0) = 2 */
+
+  output(gTxMsg);
+  write("[Gateway] Wake-up forzato: REVEIL_PRINCIPAL=2 inviato su CAN1 (frame 0x432 BSI_432).");
+}
+
 void InitFrameTable()
 {
   /* ============================================================
