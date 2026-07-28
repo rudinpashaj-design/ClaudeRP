@@ -1,0 +1,561 @@
+/*@@author(-)*/
+/*@@version(1.0)*/
+
+/* ============================================================================
+   CAN GATEWAY  CAN1 <-> CAN2 (rete HS2)  +  SIMULATORE ERRORI  (CANalyzer)
+   ============================================================================
+
+   Versione per la rete HS2 (DBC "CAN_HS2_AEE2010_R3_B2.2_K0_EURO6eBIS_V7.4.dbc"),
+   architettura identica allo script per HS1 (capl/CAN_Gateway_ErrorSim.can):
+   stessa logica di gateway, stesso filtro anti-eco, stessa simulazione errori.
+   Se non l'hai gia' letto, i commenti li' spiegano il "perche'" di alcune
+   scelte (guard di rientranza, filtro anti-eco, limiti del checksum a somma).
+
+   FUNZIONI
+   --------
+   1) Gateway trasparente bidirezionale: ogni frame ricevuto sul canale A
+      (CAN1 di HS2) viene ritrasmesso sul canale B (CAN2 di HS2) e viceversa.
+
+   2) Simulazione errori a runtime tramite System Variables + Panel:
+      TIMEOUT, DLC ERROR, CHECKSUM ERROR, COUNTER ERROR (freeze/jump) - stessa
+      interfaccia dello script HS1, vedi piu' sotto.
+
+   ATTENZIONE - COSE DA VERIFICARE PRIMA DELL'USO SU QUESTA RETE
+   -----------------------------------------------------------------
+   1) MAPPATURA CANALI FISICI: la tabella sotto assume che il canale fisico
+      "A" (kChanA, default 1) sia quello dove CMM trasmette nativamente i
+      suoi frame, e il canale "B" (kChanB, default 2) quello degli altri nodi
+      - e' la stessa assunzione di partenza usata per HS1, che poi si e'
+      rivelata INVERTITA rispetto alla realta' una volta verificata con una
+      traccia bus vera. NON dare per scontato che valga anche qui: appena hai
+      una prima traccia HS2 reale, controlla su quale canale arrivano
+      nativamente i frame CMM_xxx e quali arrivano gli altri (BSI/UC_FREIN/
+      BV/ARTIV/VSM), ed eventualmente inverti i valori "originCan" nella
+      tabella (1<->2) come fatto per HS1.
+   2) NUMERI DI CANALE: se questo script gira INSIEME a quello HS1 nella
+      STESSA misurazione (4 canali fisici totali), i canali fisici di HS2
+      NON saranno 1 e 2 ma probabilmente 3 e 4 (o comunque diversi da quelli
+      di HS1). Cambia i valori di kChanA/kChanB qui sotto per farli
+      corrispondere ai canali fisici reali assegnati a HS2 nella Channel
+      Mapping, e collega il nodo CAPL di questo script a quei due canali.
+   3) CHECKSUM: a differenza di HS1, qui NON e' stato fatto reverse
+      engineering di nessun algoritmo di checksum (serve una traccia bus
+      reale HS2, come e' stato fatto per HS1 - vedi RecomputeChecksum() piu'
+      sotto). Tutti i gChkTarget sono quindi 255 (non validato): la
+      simulazione errore counter sui frame con checksum invalidera' anche il
+      checksum come effetto collaterale, esattamente come succedeva
+      inizialmente su HS1 prima del reverse engineering.
+
+   INPUT UTENTE: SYSTEM VARIABLES DA CREARE (namespace SEPARATO da HS1)
+   ------------------------------------------------------------------------
+   Stesso principio dello script HS1 (solo variabili Integer, "@sysvar::"
+   non funziona per le String in questo ambiente CANalyzer). Namespace
+   diverso da quello di HS1 ("GatewaySimHS2" invece di "GatewaySim") cosi'
+   i due gateway restano indipendenti se attivi nella stessa misurazione:
+
+     Nome                  Descrizione
+     --------------------  ------------------------------------------------
+     FrameId               ID del frame (decimale) su cui agire
+     TimeoutDuration_ms    Durata timeout in ms (0 = indeterminato)
+     DlcErrorValue         DLC errato da forzare (0..8)
+     ErrorType             0=Nessuno 1=Timeout 2=Checksum 3=DLC
+                            4=Counter(freeze) 5=Counter(jump)
+     ApplyTrigger          Incrementare da Panel per applicare
+     ClearTrigger          Incrementare da Panel per disattivare tutto
+
+   PANEL: stessa struttura del Panel HS1, ma collegato al namespace
+   "GatewaySimHS2".
+   ============================================================================ */
+
+variables
+{
+  /* Numeri di canale fisico: A = dove CMM e' nativa, B = dove sono nativi
+     gli altri nodi. Cambiare qui se HS2 non e' sui canali 1/2 (es. se
+     coesiste con lo script HS1 nella stessa misurazione). */
+  const dword kChanA = 1;
+  const dword kChanB = 2;
+
+  /* ---------------- TABELLA FRAME ------------------------------------------
+     Ogni riga = un frame HS2, con l'eventuale posizione del segnale di
+     checksum e di counter gia' inclusa (bitLen = 0 significa "questo frame
+     non ha quel segnale"). */
+  const int kMaxFrames = 48;
+  char  gFrameName[48][51];
+  dword gFrameId[48];
+  /* 1 = origine canale A, 2 = origine canale B. Vedi nota "DA VERIFICARE"
+     nell'header: qui e' l'assunzione diretta da DBC (CMM -> A, altri -> B),
+     NON ancora confermata da una traccia bus reale HS2. */
+  byte  gFrameOriginCan[48];
+  byte  gChkByteIdx[48];
+  byte  gChkBitStart[48];
+  byte  gChkBitLen[48];    /* 0 = nessun checksum su questo frame */
+  /* Target del checksum a somma (vedi RecomputeChecksum): 255 = non
+     validato per nessun frame HS2 al momento (serve una traccia reale per
+     il reverse engineering, vedi header). */
+  byte  gChkTarget[48];
+  byte  gCntByteIdx[48];
+  byte  gCntBitStart[48];
+  byte  gCntBitLen[48];    /* 0 = nessun counter su questo frame */
+  int   gFrameCount;
+
+  /* ---------------- STATO SIMULAZIONE: TIMEOUT ---------------------------- */
+  dword   gTimeoutActive  = 0;
+  long    gTimeoutFrameId = -1;
+  msTimer gTimeoutTimer;
+
+  /* ---------------- STATO SIMULAZIONE: DLC ERROR --------------------------- */
+  dword gDlcErrActive  = 0;
+  long  gDlcErrFrameId = -1;
+  byte  gDlcErrValue   = 0;
+
+  /* ---------------- STATO SIMULAZIONE: CHECKSUM ERROR ----------------------- */
+  dword gChkErrActive   = 0;
+  long  gChkErrFrameId  = -1;
+  int   gChkErrFrameIdx = -1;
+
+  /* ---------------- STATO SIMULAZIONE: COUNTER ERROR ------------------------ */
+  dword gCntErrActive   = 0;
+  long  gCntErrFrameId  = -1;
+  int   gCntErrFrameIdx = -1;
+  dword gCntErrMode     = 0;  /* 0 = freeze, 1 = jump */
+  dword gCntFrozenValue = 0;
+  dword gCntFrozenValid = 0;
+
+  /* ---------------- MESSAGGIO GENERICO RIUSABILE PER IL FORWARDING ---------- */
+  message 0x000 gTxMsg;
+
+  /* Guard di rientranza (vedi spiegazione nello script HS1). */
+  dword gInForward = 0;
+}
+
+
+/* ============================================================================
+   INIZIALIZZAZIONE
+   ============================================================================ */
+
+on preStart
+{
+  gFrameCount = 0;
+  InitFrameTable();
+  write("[GatewayHS2] Inizializzato. Frame configurati: %d", gFrameCount);
+}
+
+void InitFrameTable()
+{
+  /* ============================================================
+     Tabella generata da: CAN_HS2_AEE2010_R3_B2.2_K0_EURO6eBIS_V7.4.dbc
+     33 frame totali (18 trasmessi da CMM -> canale A, 15 dagli altri nodi
+     -> canale B). Parametri:
+       AddFrame(nome, ID, originCan, chkByte, chkBit, chkLen, cntByte, cntBit, cntLen)
+     Byte index / bit start / bit length calcolati per encoding empirico
+     direttamente dal DBC (stesso metodo usato per HS1), quindi corretti
+     indipendentemente dal byte order (Motorola) usato nel file.
+     ATTENZIONE: originCan e i target di checksum NON sono ancora stati
+     verificati/validati su una traccia bus reale HS2 - vedi note in cima
+     al file.
+     ============================================================ */
+
+  AddFrame("ESC_1CD", 0x1CD, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("CMM_228", 0x228, 1, 3, 0, 4, 3, 4, 4);
+  AddFrame("CMM_298", 0x298, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("CMM_2B2", 0x2B2, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("MDD_ETAT_2B6", 0x2B6, 2, 7, 0, 4, 7, 4, 4);
+  AddFrame("CMM_2B8", 0x2B8, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("UCF_2CD", 0x2CD, 2, 1, 0, 4, 1, 4, 4);
+  AddFrame("CMM_2D8", 0x2D8, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("CMM_BV_2E8", 0x2E8, 1, 7, 0, 4, 7, 4, 4);
+  AddFrame("CMM_2F8", 0x2F8, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("CMM_318", 0x318, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("STT_BV_329", 0x329, 2, 0, 4, 4, 0, 0, 4);
+  AddFrame("UCF_MDD_32D", 0x32D, 2, 7, 0, 4, 7, 4, 4);
+  AddFrame("CMM_3B8", 0x3B8, 1, 0, 0, 0, 6, 4, 4);
+  AddFrame("STT_CMM_3C8", 0x3C8, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("CMM_408", 0x408, 1, 5, 4, 4, 5, 0, 4);
+  AddFrame("ESC_42D", 0x42D, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("BSI_42E", 0x42E, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("CMM_438", 0x438, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("CMM_488", 0x488, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("BSI_48E", 0x48E, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("VIS_BSI_4B2", 0x4B2, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("WMI_BSI_4D2", 0x4D2, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("BSI_4F2", 0x4F2, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("DAT_CMM_E_VCU_508", 0x508, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("CLIM_50E", 0x50E, 2, 0, 4, 2, 7, 0, 4);
+  AddFrame("DAT_BSI_532", 0x532, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("CMM_578", 0x578, 1, 0, 0, 0, 4, 0, 4);
+  AddFrame("BSI_592", 0x592, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("CMM_5A8", 0x5A8, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("CMM_5B8", 0x5B8, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("DAT_CMM_5D8", 0x5D8, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("BSI_5EE", 0x5EE, 2, 0, 0, 0, 0, 0, 0);
+
+  /* Nessuna SetChkTarget(): l'algoritmo di checksum per HS2 non e' ancora
+     stato determinato (vedi header). Frame con un segnale di checksum
+     individuato nel DBC, candidati per un futuro reverse engineering non
+     appena disponibile una traccia bus reale HS2:
+       CMM_228, MDD_ETAT_2B6, UCF_2CD, CMM_BV_2E8, STT_BV_329,
+       UCF_MDD_32D, CMM_408, CLIM_50E (quest'ultimo con checksum di soli
+       2 bit, non 4 come gli altri). */
+}
+
+void AddFrame(char name[], dword id, byte originCan, byte chkByte, byte chkBit, byte chkLen,
+              byte cntByte, byte cntBit, byte cntLen)
+{
+  if (gFrameCount >= kMaxFrames)
+  {
+    write("[GatewayHS2] ATTENZIONE: tabella frame piena, aumentare kMaxFrames");
+    return;
+  }
+  strncpy(gFrameName[gFrameCount], name, elcount(gFrameName[gFrameCount]));
+  gFrameId[gFrameCount]         = id;
+  gFrameOriginCan[gFrameCount]  = originCan;
+  gChkByteIdx[gFrameCount]      = chkByte;
+  gChkBitStart[gFrameCount]     = chkBit;
+  gChkBitLen[gFrameCount]       = chkLen;
+  gChkTarget[gFrameCount]       = 255; /* default: algoritmo non validato, vedi SetChkTarget() */
+  gCntByteIdx[gFrameCount]      = cntByte;
+  gCntBitStart[gFrameCount]     = cntBit;
+  gCntBitLen[gFrameCount]       = cntLen;
+  gFrameCount = gFrameCount + 1;
+}
+
+/* Imposta la costante target del checksum a somma per un frame gia'
+   aggiunto con AddFrame(), determinata per reverse engineering da una
+   traccia bus reale (vedi commento su gChkTarget e nello script HS1 per
+   come si e' fatto). Da chiamare in InitFrameTable() dopo il
+   corrispondente AddFrame(), una volta note le costanti per HS2. */
+void SetChkTarget(dword id, byte target)
+{
+  int i;
+  for (i = 0; i < gFrameCount; i = i + 1)
+  {
+    if (gFrameId[i] == id)
+    {
+      gChkTarget[i] = target;
+      return;
+    }
+  }
+}
+
+
+/* ============================================================================
+   GATEWAY CANALE A <-> CANALE B
+   ============================================================================
+   NOTA: "this.dir == RX" e il guard gInForward evitano che il frame appena
+   ritrasmesso da questo stesso programma venga ri-processato come se fosse
+   in ingresso, generando un loop di inoltro A->B->A->...
+   ============================================================================ */
+
+on message *
+{
+  int   i;
+  dword targetChannel;
+  int   fIdx;
+  byte  cByte, cStart, cLen;
+  byte  rawByte;
+  dword curVal, newVal, maxVal;
+
+  if (this.dir != RX)
+  {
+    return;
+  }
+
+  if (gInForward == 1)
+  {
+    return;
+  }
+
+  if (this.can == kChanA)
+  {
+    targetChannel = kChanB;
+  }
+  else if (this.can == kChanB)
+  {
+    targetChannel = kChanA;
+  }
+  else
+  {
+    return;
+  }
+
+  /* ---- 0) ANTI-ECO: un frame CONOSCIUTO non va ritrasmesso sul bus dove ha
+     gia' origine nativa (vedi spiegazione dettagliata nello script HS1). ---- */
+  fIdx = ResolveFrameIndexById(this.id);
+  if (fIdx >= 0 && gFrameOriginCan[fIdx] != this.can)
+  {
+    return;
+  }
+
+  /* ---- 1) TIMEOUT: il frame selezionato non viene inoltrato ---- */
+  if (gTimeoutActive == 1 && this.id == gTimeoutFrameId)
+  {
+    return;
+  }
+
+  gTxMsg.id  = this.id;
+  gTxMsg.dlc = this.dlc;
+  gTxMsg.dir = TX;
+  gTxMsg.can = targetChannel;
+
+  for (i = 0; i < this.dlc && i < 8; i = i + 1)
+  {
+    gTxMsg.byte(i) = this.byte(i);
+  }
+
+  /* ---- 2) DLC ERROR: forza un DLC errato in uscita ---- */
+  if (gDlcErrActive == 1 && this.id == gDlcErrFrameId)
+  {
+    gTxMsg.dlc = gDlcErrValue;
+  }
+
+  /* ---- 3) CHECKSUM ERROR: invalida il byte del segnale di checksum ---- */
+  if (gChkErrActive == 1 && this.id == gChkErrFrameId && gChkErrFrameIdx >= 0)
+  {
+    fIdx  = gChkErrFrameIdx;
+    cByte = gChkByteIdx[fIdx];
+    gTxMsg.byte(cByte) = (this.byte(cByte) + 1) & 0xFF;
+  }
+
+  /* ---- 4) COUNTER ERROR: freeze o jump del message counter ---- */
+  if (gCntErrActive == 1 && this.id == gCntErrFrameId && gCntErrFrameIdx >= 0)
+  {
+    fIdx   = gCntErrFrameIdx;
+    cByte  = gCntByteIdx[fIdx];
+    cStart = gCntBitStart[fIdx];
+    cLen   = gCntBitLen[fIdx];
+    maxVal = (1 << cLen) - 1;
+
+    rawByte = this.byte(cByte);
+    curVal  = ReadBits(rawByte, cStart, cLen);
+
+    if (gCntErrMode == 0)
+    {
+      /* freeze: congela il counter al primo valore osservato dopo l'attivazione */
+      if (gCntFrozenValid == 0)
+      {
+        gCntFrozenValue = curVal;
+        gCntFrozenValid = 1;
+      }
+      newVal = gCntFrozenValue;
+    }
+    else
+    {
+      /* jump: rompe la sequenza saltando 2 valori */
+      newVal = (curVal + 2) & maxVal;
+    }
+
+    gTxMsg.byte(cByte) = WriteBits(gTxMsg.byte(cByte), cStart, cLen, newVal);
+
+    /* Se in futuro viene validato un target di checksum per questo frame
+       (vedi SetChkTarget), il checksum viene ricalcolato valido qui,
+       esattamente come nello script HS1. */
+    if (gChkBitLen[fIdx] > 0 && gChkTarget[fIdx] != 255)
+    {
+      RecomputeChecksum(fIdx);
+    }
+  }
+
+  gInForward = 1;
+  output(gTxMsg);
+  gInForward = 0;
+}
+
+dword ReadBits(byte b, byte startBit, byte len)
+{
+  dword mask;
+  mask = (1 << len) - 1;
+  return (b >> startBit) & mask;
+}
+
+byte WriteBits(byte b, byte startBit, byte len, dword value)
+{
+  dword mask;
+  mask = ((1 << len) - 1) << startBit;
+  return (b & ~mask) | ((value << startBit) & mask);
+}
+
+/* Somma tutti i nibble di gTxMsg (sui primi gTxMsg.dlc byte) tranne il
+   nibble di checksum a (exceptByte, exceptBitStart). Assume che il
+   checksum occupi un intero nibble allineato (bitStart 0 oppure 4,
+   lunghezza 4); CLIM_50E ha un checksum di 2 bit e NON e' compatibile con
+   questa funzione cosi' com'e' - da adattare se/quando se ne valida
+   l'algoritmo. */
+dword SumAllNibblesExceptChecksum(byte exceptByte, byte exceptBitStart)
+{
+  dword sum;
+  int   i;
+  byte  b;
+
+  sum = 0;
+  for (i = 0; i < gTxMsg.dlc && i < 8; i = i + 1)
+  {
+    b = gTxMsg.byte(i);
+    if (i == exceptByte)
+    {
+      if (exceptBitStart == 0)
+      {
+        sum = sum + ((b >> 4) & 0xF);
+      }
+      else
+      {
+        sum = sum + (b & 0xF);
+      }
+    }
+    else
+    {
+      sum = sum + ((b >> 4) & 0xF) + (b & 0xF);
+    }
+  }
+  return sum;
+}
+
+/* Ricalcola e scrive in gTxMsg un checksum VALIDO per il frame fIdx,
+   secondo l'algoritmo "somma a costante" (vedi gChkTarget / SetChkTarget
+   e lo script HS1 per il procedimento di reverse engineering). */
+void RecomputeChecksum(int fIdx)
+{
+  byte cByte, cStart;
+  dword sumOther;
+  long  diff;
+  byte  newNibble;
+
+  cByte  = gChkByteIdx[fIdx];
+  cStart = gChkBitStart[fIdx];
+
+  sumOther = SumAllNibblesExceptChecksum(cByte, cStart);
+  diff = (long)gChkTarget[fIdx] - (long)(sumOther % 16);
+  if (diff < 0)
+  {
+    diff = diff + 16;
+  }
+  newNibble = diff;
+
+  gTxMsg.byte(cByte) = WriteBits(gTxMsg.byte(cByte), cStart, 4, newNibble);
+}
+
+
+/* ============================================================================
+   RISOLUZIONE FRAME da ID numerico
+   ============================================================================ */
+
+int ResolveFrameIndexById(dword id)
+{
+  int i;
+  for (i = 0; i < gFrameCount; i = i + 1)
+  {
+    if (gFrameId[i] == id)
+    {
+      return i;
+    }
+  }
+  return -1;
+}
+
+
+/* ============================================================================
+   INPUT UTENTE (System Variables) -> ATTIVAZIONE / DISATTIVAZIONE ERRORI
+   ============================================================================ */
+
+on sysvar_update sysvar::GatewaySimHS2::ApplyTrigger
+{
+  int  fIdx;
+  int  errType;
+  long frameId;
+
+  frameId = @sysvar::GatewaySimHS2::FrameId;
+  errType = @sysvar::GatewaySimHS2::ErrorType;
+
+  fIdx = ResolveFrameIndexById(frameId);
+  if (fIdx < 0)
+  {
+    write("[GatewayHS2] ERRORE: nessun frame configurato con ID 0x%X", frameId);
+    return;
+  }
+
+  switch (errType)
+  {
+    case 1: /* Timeout */
+      gTimeoutFrameId = frameId;
+      gTimeoutActive  = 1;
+      cancelTimer(gTimeoutTimer);
+      if (@sysvar::GatewaySimHS2::TimeoutDuration_ms > 0)
+      {
+        setTimer(gTimeoutTimer, @sysvar::GatewaySimHS2::TimeoutDuration_ms);
+      }
+      write("[GatewayHS2] Timeout ATTIVO su %s (ID 0x%X)", gFrameName[fIdx], frameId);
+      break;
+
+    case 2: /* Checksum error */
+      if (gChkBitLen[fIdx] == 0)
+      {
+        write("[GatewayHS2] ERRORE: %s (ID 0x%X) non ha un segnale di checksum configurato", gFrameName[fIdx], frameId);
+        return;
+      }
+      gChkErrFrameId  = frameId;
+      gChkErrFrameIdx = fIdx;
+      gChkErrActive   = 1;
+      write("[GatewayHS2] Errore CHECKSUM attivo su %s (ID 0x%X)", gFrameName[fIdx], frameId);
+      break;
+
+    case 3: /* DLC error */
+      gDlcErrFrameId = frameId;
+      gDlcErrValue   = (byte)@sysvar::GatewaySimHS2::DlcErrorValue;
+      gDlcErrActive  = 1;
+      write("[GatewayHS2] Errore DLC attivo su %s (DLC forzato a %d)", gFrameName[fIdx], gDlcErrValue);
+      break;
+
+    case 4: /* Counter error - freeze */
+    case 5: /* Counter error - jump */
+      if (gCntBitLen[fIdx] == 0)
+      {
+        write("[GatewayHS2] ERRORE: %s (ID 0x%X) non ha un segnale counter configurato", gFrameName[fIdx], frameId);
+        return;
+      }
+      gCntErrFrameId  = frameId;
+      gCntErrFrameIdx = fIdx;
+      gCntErrMode     = errType - 4; /* 0 = freeze, 1 = jump */
+      gCntFrozenValid = 0;
+      gCntErrActive   = 1;
+      if (gCntErrMode == 0)
+      {
+        write("[GatewayHS2] Errore COUNTER (freeze) attivo su %s (ID 0x%X)", gFrameName[fIdx], frameId);
+      }
+      else
+      {
+        write("[GatewayHS2] Errore COUNTER (jump) attivo su %s (ID 0x%X)", gFrameName[fIdx], frameId);
+      }
+      break;
+
+    default: /* 0 = Nessuno */
+      write("[GatewayHS2] ErrorType = None, nessuna simulazione attivata");
+      break;
+  }
+}
+
+on sysvar_update sysvar::GatewaySimHS2::ClearTrigger
+{
+  gTimeoutActive  = 0;
+  gTimeoutFrameId = -1;
+  cancelTimer(gTimeoutTimer);
+
+  gDlcErrActive  = 0;
+  gDlcErrFrameId = -1;
+
+  gChkErrActive   = 0;
+  gChkErrFrameId  = -1;
+  gChkErrFrameIdx = -1;
+
+  gCntErrActive   = 0;
+  gCntErrFrameId  = -1;
+  gCntErrFrameIdx = -1;
+  gCntFrozenValid = 0;
+
+  write("[GatewayHS2] Simulazioni errore azzerate.");
+}
+
+on timer gTimeoutTimer
+{
+  gTimeoutActive  = 0;
+  gTimeoutFrameId = -1;
+  write("[GatewayHS2] Timeout terminato, forwarding ripristinato.");
+}
