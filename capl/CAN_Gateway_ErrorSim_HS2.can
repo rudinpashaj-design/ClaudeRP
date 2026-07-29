@@ -32,16 +32,17 @@
 
    ATTENZIONE - COSE DA VERIFICARE PRIMA DELL'USO SU QUESTA RETE
    -----------------------------------------------------------------
-   1) MAPPATURA CANALI FISICI: la tabella sotto assume che il canale fisico
-      "A" (kChanA, default 1) sia quello dove CMM trasmette nativamente i
-      suoi frame, e il canale "B" (kChanB, default 2) quello degli altri nodi
-      - e' la stessa assunzione di partenza usata per HS1, che poi si e'
-      rivelata INVERTITA rispetto alla realta' una volta verificata con una
-      traccia bus vera. NON dare per scontato che valga anche qui: appena hai
-      una prima traccia HS2 reale, controlla su quale canale arrivano
-      nativamente i frame CMM_xxx e quali arrivano gli altri (BSI/UC_FREIN/
-      BV/ARTIV/VSM), ed eventualmente inverti i valori "originCan" nella
-      tabella (1<->2) come fatto per HS1.
+   1) MAPPATURA CANALI FISICI: CORRETTA il 29/07 sulla base di una traccia
+      bus reale (CAN_HS2_Logging_20260729_152751_T009.asc, dopo la
+      correzione del cablaggio CAN-H/CAN-L). La traccia mostrava su CAN1
+      fisico solo frame BSI_xxx / DAT_BSI_xxx / STT_BV_329 / CLIM_50E ecc.
+      (nessun CMM_xxx), cioe' l'ESATTO OPPOSTO dell'assunzione iniziale
+      "CAN1 = CMM, CAN2 = altri nodi" - la stessa inversione gia' vista su
+      HS1. La tabella sotto e' stata invertita di conseguenza (originCan
+      1<->2 su tutte le 33 righe): ora CMM_xxx ha originCan=2 e tutti gli
+      altri nodi (BSI/DAT_BSI/STT_BV/UCF/CLIM/VIS_BSI/WMI_BSI/ESC) hanno
+      originCan=1. Se in futuro si ricollegano i canali fisici in modo
+      diverso, verificare di nuovo con una traccia prima di fidarsi.
    2) NUMERI DI CANALE: se questo script gira INSIEME a quello HS1 nella
       STESSA misurazione (4 canali fisici totali), i canali fisici di HS2
       NON saranno 1 e 2 ma probabilmente 3 e 4 (o comunque diversi da quelli
@@ -160,44 +161,44 @@ void InitFrameTable()
      Byte index / bit start / bit length calcolati per encoding empirico
      direttamente dal DBC (stesso metodo usato per HS1), quindi corretti
      indipendentemente dal byte order (Motorola) usato nel file.
-     ATTENZIONE: originCan e i target di checksum NON sono ancora stati
-     verificati/validati su una traccia bus reale HS2 - vedi note in cima
-     al file.
+     originCan: verificato/corretto il 29/07 su traccia bus reale HS2 (vedi
+     nota in cima al file). I target di checksum (SetChkTarget) restano
+     invece NON validati: nessun reverse engineering ancora fatto per HS2.
      ============================================================ */
 
-  AddFrame("ESC_1CD", 0x1CD, 2, 0, 0, 0, 0, 0, 0);
-  AddFrame("CMM_228", 0x228, 1, 3, 0, 4, 3, 4, 4);
-  AddFrame("CMM_298", 0x298, 1, 0, 0, 0, 0, 0, 0);
-  AddFrame("CMM_2B2", 0x2B2, 1, 0, 0, 0, 0, 0, 0);
-  AddFrame("MDD_ETAT_2B6", 0x2B6, 2, 7, 0, 4, 7, 4, 4);
-  AddFrame("CMM_2B8", 0x2B8, 1, 0, 0, 0, 0, 0, 0);
-  AddFrame("UCF_2CD", 0x2CD, 2, 1, 0, 4, 1, 4, 4);
-  AddFrame("CMM_2D8", 0x2D8, 1, 0, 0, 0, 0, 0, 0);
-  AddFrame("CMM_BV_2E8", 0x2E8, 1, 7, 0, 4, 7, 4, 4);
-  AddFrame("CMM_2F8", 0x2F8, 1, 0, 0, 0, 0, 0, 0);
-  AddFrame("CMM_318", 0x318, 1, 0, 0, 0, 0, 0, 0);
-  AddFrame("STT_BV_329", 0x329, 2, 0, 4, 4, 0, 0, 4);
-  AddFrame("UCF_MDD_32D", 0x32D, 2, 7, 0, 4, 7, 4, 4);
-  AddFrame("CMM_3B8", 0x3B8, 1, 0, 0, 0, 6, 4, 4);
-  AddFrame("STT_CMM_3C8", 0x3C8, 1, 0, 0, 0, 0, 0, 0);
-  AddFrame("CMM_408", 0x408, 1, 5, 4, 4, 5, 0, 4);
-  AddFrame("ESC_42D", 0x42D, 2, 0, 0, 0, 0, 0, 0);
-  AddFrame("BSI_42E", 0x42E, 2, 0, 0, 0, 0, 0, 0);
-  AddFrame("CMM_438", 0x438, 1, 0, 0, 0, 0, 0, 0);
-  AddFrame("CMM_488", 0x488, 1, 0, 0, 0, 0, 0, 0);
-  AddFrame("BSI_48E", 0x48E, 2, 0, 0, 0, 0, 0, 0);
-  AddFrame("VIS_BSI_4B2", 0x4B2, 2, 0, 0, 0, 0, 0, 0);
-  AddFrame("WMI_BSI_4D2", 0x4D2, 2, 0, 0, 0, 0, 0, 0);
-  AddFrame("BSI_4F2", 0x4F2, 2, 0, 0, 0, 0, 0, 0);
-  AddFrame("DAT_CMM_E_VCU_508", 0x508, 1, 0, 0, 0, 0, 0, 0);
-  AddFrame("CLIM_50E", 0x50E, 2, 0, 4, 2, 7, 0, 4);
-  AddFrame("DAT_BSI_532", 0x532, 2, 0, 0, 0, 0, 0, 0);
-  AddFrame("CMM_578", 0x578, 1, 0, 0, 0, 4, 0, 4);
-  AddFrame("BSI_592", 0x592, 2, 0, 0, 0, 0, 0, 0);
-  AddFrame("CMM_5A8", 0x5A8, 1, 0, 0, 0, 0, 0, 0);
-  AddFrame("CMM_5B8", 0x5B8, 1, 0, 0, 0, 0, 0, 0);
-  AddFrame("DAT_CMM_5D8", 0x5D8, 1, 0, 0, 0, 0, 0, 0);
-  AddFrame("BSI_5EE", 0x5EE, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("ESC_1CD", 0x1CD, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("CMM_228", 0x228, 2, 3, 0, 4, 3, 4, 4);
+  AddFrame("CMM_298", 0x298, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("CMM_2B2", 0x2B2, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("MDD_ETAT_2B6", 0x2B6, 1, 7, 0, 4, 7, 4, 4);
+  AddFrame("CMM_2B8", 0x2B8, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("UCF_2CD", 0x2CD, 1, 1, 0, 4, 1, 4, 4);
+  AddFrame("CMM_2D8", 0x2D8, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("CMM_BV_2E8", 0x2E8, 2, 7, 0, 4, 7, 4, 4);
+  AddFrame("CMM_2F8", 0x2F8, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("CMM_318", 0x318, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("STT_BV_329", 0x329, 1, 0, 4, 4, 0, 0, 4);
+  AddFrame("UCF_MDD_32D", 0x32D, 1, 7, 0, 4, 7, 4, 4);
+  AddFrame("CMM_3B8", 0x3B8, 2, 0, 0, 0, 6, 4, 4);
+  AddFrame("STT_CMM_3C8", 0x3C8, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("CMM_408", 0x408, 2, 5, 4, 4, 5, 0, 4);
+  AddFrame("ESC_42D", 0x42D, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("BSI_42E", 0x42E, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("CMM_438", 0x438, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("CMM_488", 0x488, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("BSI_48E", 0x48E, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("VIS_BSI_4B2", 0x4B2, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("WMI_BSI_4D2", 0x4D2, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("BSI_4F2", 0x4F2, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("DAT_CMM_E_VCU_508", 0x508, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("CLIM_50E", 0x50E, 1, 0, 4, 2, 7, 0, 4);
+  AddFrame("DAT_BSI_532", 0x532, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("CMM_578", 0x578, 2, 0, 0, 0, 4, 0, 4);
+  AddFrame("BSI_592", 0x592, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("CMM_5A8", 0x5A8, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("CMM_5B8", 0x5B8, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("DAT_CMM_5D8", 0x5D8, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("BSI_5EE", 0x5EE, 1, 0, 0, 0, 0, 0, 0);
 
   /* Nessuna SetChkTarget(): l'algoritmo di checksum per HS2 non e' ancora
      stato determinato (vedi header). Frame con un segnale di checksum
