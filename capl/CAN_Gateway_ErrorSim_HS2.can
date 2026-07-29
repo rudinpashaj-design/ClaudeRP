@@ -6,15 +6,25 @@
    ============================================================================
 
    Versione per la rete HS2 (DBC "CAN_HS2_AEE2010_R3_B2.2_K0_EURO6eBIS_V7.4.dbc"),
-   architettura identica allo script per HS1 (capl/CAN_Gateway_ErrorSim.can):
-   stessa logica di gateway, stesso filtro anti-eco, stessa simulazione errori.
-   Se non l'hai gia' letto, i commenti li' spiegano il "perche'" di alcune
-   scelte (guard di rientranza, filtro anti-eco, limiti del checksum a somma).
+   basata sullo stesso script HS1 (capl/CAN_Gateway_ErrorSim.can) ma con una
+   differenza importante nel gateway stesso (vedi punto 1 sotto e la nota
+   "WHITELIST" nell'handler "on message *"). Per il resto: stesso filtro
+   anti-eco, stessa simulazione errori. Se non l'hai gia' letto, i commenti
+   nello script HS1 spiegano il "perche'" di alcune scelte (guard di
+   rientranza, filtro anti-eco, limiti del checksum a somma).
 
    FUNZIONI
    --------
-   1) Gateway trasparente bidirezionale: ogni frame ricevuto sul canale A
-      (CAN1 di HS2) viene ritrasmesso sul canale B (CAN2 di HS2) e viceversa.
+   1) Gateway "whitelist" bidirezionale: a differenza di HS1 (che inoltra
+      QUALSIASI ID, anche quelli non nel DBC), qui viene inoltrato SOLO un
+      frame il cui ID e' presente nel DBC HS2 caricato in InitFrameTable().
+      Scelta fatta perche' su HS2 i due canali sono segmenti fisicamente
+      separati (nessuna continuita' elettrica tra i connettori, verificato),
+      probabilmente gia' collegati da un vero gateway del veicolo (BSI?) che
+      relay-a solo un sottoinsieme selettivo di messaggi: inoltrare alla
+      cieca anche gli ID non documentati nel DBC ha causato errori di
+      trasmissione reali su frame che con ogni probabilita' non erano
+      destinati ad attraversare verso l'altro segmento.
 
    2) Simulazione errori a runtime tramite System Variables + Panel:
       TIMEOUT, DLC ERROR, CHECKSUM ERROR, COUNTER ERROR (freeze/jump) - stessa
@@ -278,10 +288,27 @@ on message *
     return;
   }
 
-  /* ---- 0) ANTI-ECO: un frame CONOSCIUTO non va ritrasmesso sul bus dove ha
-     gia' origine nativa (vedi spiegazione dettagliata nello script HS1). ---- */
+  /* ---- 0) WHITELIST + ANTI-ECO -------------------------------------------
+     A differenza dello script HS1 (che inoltra qualsiasi ID, anche quelli
+     non presenti nel DBC), qui il gateway e' volutamente "whitelist": un ID
+     NON presente nella tabella (cioe' non nel DBC HS2) non viene MAI
+     inoltrato. Motivo: su HS2 i due canali sono segmenti fisicamente
+     separati (confermato: nessuna continuita' elettrica misurata tra i due
+     connettori) probabilmente gia' collegati da un vero gateway del veicolo
+     (sospetto: il BSI), che con ogni probabilita' relay-a solo un
+     sottoinsieme selettivo dei messaggi, non tutto. Inoltrare alla cieca
+     anche gli ID sconosciuti al DBC (come veniva fatto per HS1) ha causato
+     errori "could not be sent" su ID reali ma non documentati in questo DBC
+     (es. 0x34D, CDS_V2_34D di UC_FREIN), quasi certamente perche' quei
+     messaggi non erano destinati ad attraversare verso l'altro segmento.
+     Se in futuro si scopre che alcuni ID extra-DBC vanno comunque inoltrati,
+     vanno aggiunti esplicitamente alla tabella con AddFrame(). */
   fIdx = ResolveFrameIndexById(this.id);
-  if (fIdx >= 0 && gFrameOriginCan[fIdx] != this.can)
+  if (fIdx < 0)
+  {
+    return;
+  }
+  if (gFrameOriginCan[fIdx] != this.can)
   {
     return;
   }
