@@ -1,0 +1,561 @@
+/*@@author(-)*/
+/*@@version(1.0)*/
+
+/* ============================================================================
+   CAN GATEWAY  CAN1 <-> CAN2 (rete NOx/HCU)  +  SIMULATORE ERRORI  (CANalyzer)
+   ============================================================================
+
+   Versione per la rete diagnostica/calibrazione del sensore NOx e della
+   centralina riscaldatore (DBC "NOx_HCU_PM_v3.dbc"), basata sullo stesso
+   schema degli script HS1 (capl/CAN_Gateway_ErrorSim.can) e HS2
+   (capl/CAN_Gateway_ErrorSim_HS2.can). Se non li hai gia' letti, i commenti
+   in quegli script spiegano il "perche'" di alcune scelte (guard di
+   rientranza, filtro anti-eco, limiti del checksum a somma).
+
+   FUNZIONI
+   --------
+   1) Gateway trasparente bidirezionale, stile HS1 (NON whitelist come HS2):
+      ogni frame ricevuto su un canale viene ritrasmesso sull'altro,
+      indipendentemente dal fatto che il suo ID sia nel DBC o meno. Scelta
+      di default perche', a differenza di HS2, non c'e' alcuna evidenza che
+      questa rete sia composta da due segmenti fisicamente separati. Se in
+      uso emergono errori di trasmissione "could not be sent" su ID non
+      documentati (come successo su HS2), va applicato lo stesso fix
+      whitelist-only visto li'.
+
+   2) Simulazione errori a runtime tramite System Variables + Panel:
+      TIMEOUT, DLC ERROR, CHECKSUM ERROR, COUNTER ERROR (freeze/jump) - stessa
+      interfaccia degli script HS1/HS2, vedi piu' sotto.
+
+   ATTENZIONE - COSE DA VERIFICARE PRIMA DELL'USO SU QUESTA RETE
+   -----------------------------------------------------------------
+   1) MAPPATURA CANALI FISICI: la tabella sotto assume che il canale fisico
+      "A" (kChanA, default 1) sia quello dove ECM trasmette nativamente i
+      suoi frame, e il canale "B" (kChanB, default 2) quello di tutti gli
+      altri nodi (SCU, HCUPC, EGSNXUpStream_B1, EGSNXMidStream_B1,
+      EGSNXDwnStream_B1, TSTR) - e' l'assunzione diretta dal campo "sender"
+      del DBC, la STESSA assunzione di partenza usata inizialmente per HS1 e
+      HS2, che in ENTRAMBI i casi si e' poi rivelata INVERTITA rispetto alla
+      realta' una volta verificata con una traccia bus vera. NON dare per
+      scontato che qui sia corretta: appena hai una prima traccia reale di
+      questa rete, controlla su quale canale fisico arrivano nativamente i
+      frame ECM (0x150, 0x158, 0x309, 0x385, 0x3A5) e quali arrivano gli
+      altri nodi, ed eventualmente inverti i valori "originCan" nella
+      tabella (1<->2) come gia' fatto per HS1 e HS2.
+   2) NUMERI DI CANALE: se questo script gira INSIEME a quelli HS1/HS2 nella
+      STESSA misurazione, i canali fisici di questa rete probabilmente NON
+      saranno 1 e 2. Cambia i valori di kChanA/kChanB qui sotto per farli
+      corrispondere ai canali fisici reali assegnati a questa rete nella
+      Channel Mapping, e collega il nodo CAPL di questo script a quei due
+      canali.
+   3) CHECKSUM / COUNTER: a differenza di HS1/HS2, in questo DBC NON esiste
+      NESSUN segnale che sembri un vero checksum o un rolling counter di
+      frame (nessun segnale con nome tipo "checksum"/"crc"/"counter"/"cnt"/
+      "alive"/"toggle" nell'intero file). L'unico segnale con "Cnt" nel nome,
+      EGSNX_ECUa_LftCnt ("life count", presente nei frame 0x311/0x389/0x3A9),
+      e' un contatore gestionale/diagnostico (tipo "numero di attivazioni"),
+      non un rolling counter di frescatura frame-per-frame: non e' stato
+      usato per la simulazione errore counter, esattamente come CPT_NBR_REDEM
+      escluso su HS1. Di conseguenza TUTTI i frame qui hanno chkLen=0 e
+      cntLen=0: la simulazione CHECKSUM ERROR e COUNTER ERROR rifiutera'
+      sempre l'attivazione su qualunque frame di questa rete (vedi il case 2
+      e il case 4/5 piu' sotto, gia' presenti anche negli script precedenti
+      per i frame senza questi segnali) - restano pienamente funzionanti
+      TIMEOUT e DLC ERROR su tutti i 18 frame.
+   4) NATURA DELLA RETE: diversamente da HS1/HS2 (rete body/multiplex PSA),
+      questa e' una rete diagnostica/calibrazione per il sensore NOx e la
+      centralina riscaldatore (protocollo XCP per DAQ/calibrazione: frame
+      0x630-0x633, 0x637), quindi e' normale che manchino segnali di
+      checksum/counter in stile "rolling counter" da bus body.
+
+   INPUT UTENTE: SYSTEM VARIABLES DA CREARE (namespace SEPARATO da HS1/HS2)
+   ------------------------------------------------------------------------
+   Stesso principio degli script precedenti (solo variabili Integer,
+   "@sysvar::" non funziona per le String in questo ambiente CANalyzer).
+   Namespace "GatewaySimNOxHCU" cosi' tutti e tre i gateway restano
+   indipendenti se attivi nella stessa misurazione:
+
+     Nome                  Descrizione
+     --------------------  ------------------------------------------------
+     FrameId               ID del frame (decimale) su cui agire
+     TimeoutDuration_ms    Durata timeout in ms (0 = indeterminato)
+     DlcErrorValue         DLC errato da forzare (0..8)
+     ErrorType             0=Nessuno 1=Timeout 2=Checksum 3=DLC
+                            4=Counter(freeze) 5=Counter(jump)
+     ApplyTrigger          Incrementare da Panel per applicare
+     ClearTrigger          Incrementare da Panel per disattivare tutto
+
+   PANEL: stessa struttura del Panel HS1/HS2, ma collegato al namespace
+   "GatewaySimNOxHCU".
+   ============================================================================ */
+
+variables
+{
+  /* Numeri di canale fisico: A = dove ECM e' nativo, B = dove sono nativi
+     tutti gli altri nodi. Cambiare qui se questa rete non e' sui canali 1/2
+     (es. se coesiste con gli script HS1/HS2 nella stessa misurazione). */
+  const dword kChanA = 1;
+  const dword kChanB = 2;
+
+  /* ---------------- TABELLA FRAME ------------------------------------------
+     Ogni riga = un frame di questa rete. chkLen/cntLen sono sempre 0 (vedi
+     punto 3 dell'header: nessun segnale di checksum/counter in questo DBC). */
+  const int kMaxFrames = 24;
+  char  gFrameName[24][51];
+  dword gFrameId[24];
+  /* 1 = origine canale A, 2 = origine canale B. Vedi nota "DA VERIFICARE"
+     nell'header: qui e' l'assunzione diretta da DBC (ECM -> A, altri -> B),
+     NON ancora confermata da una traccia bus reale di questa rete. */
+  byte  gFrameOriginCan[24];
+  byte  gChkByteIdx[24];
+  byte  gChkBitStart[24];
+  byte  gChkBitLen[24];    /* sempre 0 in questo DBC: nessun frame ha un checksum */
+  byte  gChkTarget[24];
+  byte  gCntByteIdx[24];
+  byte  gCntBitStart[24];
+  byte  gCntBitLen[24];    /* sempre 0 in questo DBC: nessun frame ha un counter */
+  int   gFrameCount;
+
+  /* ---------------- STATO SIMULAZIONE: TIMEOUT ---------------------------- */
+  dword   gTimeoutActive  = 0;
+  long    gTimeoutFrameId = -1;
+  msTimer gTimeoutTimer;
+
+  /* ---------------- STATO SIMULAZIONE: DLC ERROR --------------------------- */
+  dword gDlcErrActive  = 0;
+  long  gDlcErrFrameId = -1;
+  byte  gDlcErrValue   = 0;
+
+  /* ---------------- STATO SIMULAZIONE: CHECKSUM ERROR ----------------------- */
+  dword gChkErrActive   = 0;
+  long  gChkErrFrameId  = -1;
+  int   gChkErrFrameIdx = -1;
+
+  /* ---------------- STATO SIMULAZIONE: COUNTER ERROR ------------------------ */
+  dword gCntErrActive   = 0;
+  long  gCntErrFrameId  = -1;
+  int   gCntErrFrameIdx = -1;
+  dword gCntErrMode     = 0;  /* 0 = freeze, 1 = jump */
+  dword gCntFrozenValue = 0;
+  dword gCntFrozenValid = 0;
+
+  /* ---------------- MESSAGGIO GENERICO RIUSABILE PER IL FORWARDING ---------- */
+  message 0x000 gTxMsg;
+
+  /* Guard di rientranza (vedi spiegazione nello script HS1). */
+  dword gInForward = 0;
+}
+
+
+/* ============================================================================
+   INIZIALIZZAZIONE
+   ============================================================================ */
+
+on preStart
+{
+  gFrameCount = 0;
+  InitFrameTable();
+  write("[GatewayNOxHCU] Inizializzato. Frame configurati: %d", gFrameCount);
+}
+
+void InitFrameTable()
+{
+  /* ============================================================
+     Tabella generata da: NOx_HCU_PM_v3.dbc
+     18 frame totali (5 trasmessi da ECM -> canale A, 13 dagli altri nodi
+     -> canale B). Parametri:
+       AddFrame(nome, ID, originCan, chkByte, chkBit, chkLen, cntByte, cntBit, cntLen)
+     chkLen e cntLen sono sempre 0: questo DBC non contiene nessun segnale
+     di checksum ne' di rolling counter (vedi punto 3 dell'header).
+     originCan e' l'assunzione diretta dal campo sender del DBC, NON ancora
+     verificata su una traccia bus reale di questa rete (vedi header).
+     ============================================================ */
+
+  AddFrame("PM_Rx",                          0x150, 1, 0, 0, 0, 0, 0, 0); /* ECM */
+  AddFrame("ECU_data_reqst_HCUPC",           0x158, 1, 0, 0, 0, 0, 0, 0); /* ECM */
+  AddFrame("HCUPC_data1_Resp_ecu",           0x159, 2, 0, 0, 0, 0, 0, 0); /* HCUPC */
+  AddFrame("HCUPC_diag_data_Resp_ecu",       0x160, 2, 0, 0, 0, 0, 0, 0); /* HCUPC */
+  AddFrame("PM_TxDiag",                      0x249, 2, 0, 0, 0, 0, 0, 0); /* SCU */
+  AddFrame("PM_TxPhys",                      0x250, 2, 0, 0, 0, 0, 0, 0); /* SCU */
+  AddFrame("PM_TxInfo",                      0x251, 2, 0, 0, 0, 0, 0, 0); /* SCU */
+  AddFrame("Eng_Data_EGSNXUpStream_B1_Rqst", 0x309, 1, 0, 0, 0, 0, 0, 0); /* ECM */
+  AddFrame("EGSNXUpStream_B1_data_1",        0x311, 2, 0, 0, 0, 0, 0, 0); /* EGSNXUpStream_B1 */
+  AddFrame("Eng_Data_EGSNXMidStream_B1_Rqst",0x385, 1, 0, 0, 0, 0, 0, 0); /* ECM */
+  AddFrame("EGSNXMidStream_B1_data_1",       0x389, 2, 0, 0, 0, 0, 0, 0); /* EGSNXMidStream_B1 */
+  AddFrame("Eng_Data_EGSNXDwnStream_B1_Rqst",0x3A5, 1, 0, 0, 0, 0, 0, 0); /* ECM */
+  AddFrame("EGSNXDwnStream_B1_data_1",       0x3A9, 2, 0, 0, 0, 0, 0, 0); /* EGSNXDwnStream_B1 */
+  AddFrame("XCPTx",                          0x630, 2, 0, 0, 0, 0, 0, 0); /* EGSNX*_B1 (XCP) */
+  AddFrame("XCP_DAQ0",                       0x631, 2, 0, 0, 0, 0, 0, 0); /* EGSNX*_B1 (XCP) */
+  AddFrame("XCP_DAQ1",                       0x632, 2, 0, 0, 0, 0, 0, 0); /* EGSNX*_B1 (XCP) */
+  AddFrame("XCP_DAQ2",                       0x633, 2, 0, 0, 0, 0, 0, 0); /* EGSNX*_B1 (XCP) */
+  AddFrame("XCPRx",                          0x637, 2, 0, 0, 0, 0, 0, 0); /* TSTR */
+
+  /* Nessuna SetChkTarget(): nessun frame di questa rete ha un segnale di
+     checksum (vedi punto 3 dell'header). */
+}
+
+void AddFrame(char name[], dword id, byte originCan, byte chkByte, byte chkBit, byte chkLen,
+              byte cntByte, byte cntBit, byte cntLen)
+{
+  if (gFrameCount >= kMaxFrames)
+  {
+    write("[GatewayNOxHCU] ATTENZIONE: tabella frame piena, aumentare kMaxFrames");
+    return;
+  }
+  strncpy(gFrameName[gFrameCount], name, elcount(gFrameName[gFrameCount]));
+  gFrameId[gFrameCount]         = id;
+  gFrameOriginCan[gFrameCount]  = originCan;
+  gChkByteIdx[gFrameCount]      = chkByte;
+  gChkBitStart[gFrameCount]     = chkBit;
+  gChkBitLen[gFrameCount]       = chkLen;
+  gChkTarget[gFrameCount]       = 255; /* default: nessun algoritmo di checksum in questo DBC */
+  gCntByteIdx[gFrameCount]      = cntByte;
+  gCntBitStart[gFrameCount]     = cntBit;
+  gCntBitLen[gFrameCount]       = cntLen;
+  gFrameCount = gFrameCount + 1;
+}
+
+/* Imposta la costante target del checksum a somma per un frame gia'
+   aggiunto con AddFrame() (vedi commento su gChkTarget e lo script HS1 per
+   come si e' fatto il reverse engineering). Non chiamata da nessuna riga di
+   InitFrameTable() in questo script: nessun frame di questa rete ha un
+   checksum, ma la funzione resta per coerenza con HS1/HS2 e per un
+   eventuale uso futuro se si scoprisse un segnale di checksum non presente
+   nel DBC. */
+void SetChkTarget(dword id, byte target)
+{
+  int i;
+  for (i = 0; i < gFrameCount; i = i + 1)
+  {
+    if (gFrameId[i] == id)
+    {
+      gChkTarget[i] = target;
+      return;
+    }
+  }
+}
+
+
+/* ============================================================================
+   GATEWAY CANALE A <-> CANALE B
+   ============================================================================
+   NOTA: "this.dir == RX" e il guard gInForward evitano che il frame appena
+   ritrasmesso da questo stesso programma venga ri-processato come se fosse
+   in ingresso, generando un loop di inoltro A->B->A->...
+   ============================================================================ */
+
+on message *
+{
+  int   i;
+  dword targetChannel;
+  int   fIdx;
+  byte  cByte, cStart, cLen;
+  byte  rawByte;
+  dword curVal, newVal, maxVal;
+
+  if (this.dir != RX)
+  {
+    return;
+  }
+
+  if (gInForward == 1)
+  {
+    return;
+  }
+
+  if (this.can == kChanA)
+  {
+    targetChannel = kChanB;
+  }
+  else if (this.can == kChanB)
+  {
+    targetChannel = kChanA;
+  }
+  else
+  {
+    return;
+  }
+
+  /* ---- 0) ANTI-ECO: un frame CONOSCIUTO non va ritrasmesso sul bus dove ha
+     gia' origine nativa (vedi spiegazione dettagliata nello script HS1). I
+     frame non presenti in tabella vengono comunque sempre inoltrati (gateway
+     generico, stile HS1 - non whitelist come HS2). ---- */
+  fIdx = ResolveFrameIndexById(this.id);
+  if (fIdx >= 0 && gFrameOriginCan[fIdx] != this.can)
+  {
+    return;
+  }
+
+  /* ---- 1) TIMEOUT: il frame selezionato non viene inoltrato ---- */
+  if (gTimeoutActive == 1 && this.id == gTimeoutFrameId)
+  {
+    return;
+  }
+
+  gTxMsg.id  = this.id;
+  gTxMsg.dlc = this.dlc;
+  gTxMsg.dir = TX;
+  gTxMsg.can = targetChannel;
+
+  for (i = 0; i < this.dlc && i < 8; i = i + 1)
+  {
+    gTxMsg.byte(i) = this.byte(i);
+  }
+
+  /* ---- 2) DLC ERROR: forza un DLC errato in uscita ---- */
+  if (gDlcErrActive == 1 && this.id == gDlcErrFrameId)
+  {
+    gTxMsg.dlc = gDlcErrValue;
+  }
+
+  /* ---- 3) CHECKSUM ERROR: invalida il byte del segnale di checksum ---- */
+  if (gChkErrActive == 1 && this.id == gChkErrFrameId && gChkErrFrameIdx >= 0)
+  {
+    fIdx  = gChkErrFrameIdx;
+    cByte = gChkByteIdx[fIdx];
+    gTxMsg.byte(cByte) = (this.byte(cByte) + 1) & 0xFF;
+  }
+
+  /* ---- 4) COUNTER ERROR: freeze o jump del message counter ---- */
+  if (gCntErrActive == 1 && this.id == gCntErrFrameId && gCntErrFrameIdx >= 0)
+  {
+    fIdx   = gCntErrFrameIdx;
+    cByte  = gCntByteIdx[fIdx];
+    cStart = gCntBitStart[fIdx];
+    cLen   = gCntBitLen[fIdx];
+    maxVal = (1 << cLen) - 1;
+
+    rawByte = this.byte(cByte);
+    curVal  = ReadBits(rawByte, cStart, cLen);
+
+    if (gCntErrMode == 0)
+    {
+      /* freeze: congela il counter al primo valore osservato dopo l'attivazione */
+      if (gCntFrozenValid == 0)
+      {
+        gCntFrozenValue = curVal;
+        gCntFrozenValid = 1;
+      }
+      newVal = gCntFrozenValue;
+    }
+    else
+    {
+      /* jump: rompe la sequenza saltando 2 valori */
+      newVal = (curVal + 2) & maxVal;
+    }
+
+    gTxMsg.byte(cByte) = WriteBits(gTxMsg.byte(cByte), cStart, cLen, newVal);
+
+    /* Se in futuro viene validato un target di checksum per questo frame
+       (vedi SetChkTarget), il checksum viene ricalcolato valido qui,
+       esattamente come negli script HS1/HS2. */
+    if (gChkBitLen[fIdx] > 0 && gChkTarget[fIdx] != 255)
+    {
+      RecomputeChecksum(fIdx);
+    }
+  }
+
+  gInForward = 1;
+  output(gTxMsg);
+  gInForward = 0;
+}
+
+dword ReadBits(byte b, byte startBit, byte len)
+{
+  dword mask;
+  mask = (1 << len) - 1;
+  return (b >> startBit) & mask;
+}
+
+byte WriteBits(byte b, byte startBit, byte len, dword value)
+{
+  dword mask;
+  mask = ((1 << len) - 1) << startBit;
+  return (b & ~mask) | ((value << startBit) & mask);
+}
+
+/* Somma tutti i nibble di gTxMsg (sui primi gTxMsg.dlc byte) tranne il
+   nibble di checksum a (exceptByte, exceptBitStart). Nessun frame di questa
+   rete ha attualmente un gChkTarget valido, quindi questa funzione non
+   viene mai invocata: resta per coerenza con HS1/HS2 e per un eventuale
+   uso futuro. */
+dword SumAllNibblesExceptChecksum(byte exceptByte, byte exceptBitStart)
+{
+  dword sum;
+  int   i;
+  byte  b;
+
+  sum = 0;
+  for (i = 0; i < gTxMsg.dlc && i < 8; i = i + 1)
+  {
+    b = gTxMsg.byte(i);
+    if (i == exceptByte)
+    {
+      if (exceptBitStart == 0)
+      {
+        sum = sum + ((b >> 4) & 0xF);
+      }
+      else
+      {
+        sum = sum + (b & 0xF);
+      }
+    }
+    else
+    {
+      sum = sum + ((b >> 4) & 0xF) + (b & 0xF);
+    }
+  }
+  return sum;
+}
+
+/* Ricalcola e scrive in gTxMsg un checksum VALIDO per il frame fIdx,
+   secondo l'algoritmo "somma a costante" (vedi gChkTarget / SetChkTarget e
+   lo script HS1 per il procedimento di reverse engineering). Non usata in
+   questo script (nessun frame ha un gChkTarget valido), resta per coerenza. */
+void RecomputeChecksum(int fIdx)
+{
+  byte cByte, cStart;
+  dword sumOther;
+  long  diff;
+  byte  newNibble;
+
+  cByte  = gChkByteIdx[fIdx];
+  cStart = gChkBitStart[fIdx];
+
+  sumOther = SumAllNibblesExceptChecksum(cByte, cStart);
+  diff = (long)gChkTarget[fIdx] - (long)(sumOther % 16);
+  if (diff < 0)
+  {
+    diff = diff + 16;
+  }
+  newNibble = diff;
+
+  gTxMsg.byte(cByte) = WriteBits(gTxMsg.byte(cByte), cStart, 4, newNibble);
+}
+
+
+/* ============================================================================
+   RISOLUZIONE FRAME da ID numerico
+   ============================================================================ */
+
+int ResolveFrameIndexById(dword id)
+{
+  int i;
+  for (i = 0; i < gFrameCount; i = i + 1)
+  {
+    if (gFrameId[i] == id)
+    {
+      return i;
+    }
+  }
+  return -1;
+}
+
+
+/* ============================================================================
+   INPUT UTENTE (System Variables) -> ATTIVAZIONE / DISATTIVAZIONE ERRORI
+   ============================================================================ */
+
+on sysvar_update sysvar::GatewaySimNOxHCU::ApplyTrigger
+{
+  int  fIdx;
+  int  errType;
+  long frameId;
+
+  frameId = @sysvar::GatewaySimNOxHCU::FrameId;
+  errType = @sysvar::GatewaySimNOxHCU::ErrorType;
+
+  fIdx = ResolveFrameIndexById(frameId);
+  if (fIdx < 0)
+  {
+    write("[GatewayNOxHCU] ERRORE: nessun frame configurato con ID 0x%X", frameId);
+    return;
+  }
+
+  switch (errType)
+  {
+    case 1: /* Timeout */
+      gTimeoutFrameId = frameId;
+      gTimeoutActive  = 1;
+      cancelTimer(gTimeoutTimer);
+      if (@sysvar::GatewaySimNOxHCU::TimeoutDuration_ms > 0)
+      {
+        setTimer(gTimeoutTimer, @sysvar::GatewaySimNOxHCU::TimeoutDuration_ms);
+      }
+      write("[GatewayNOxHCU] Timeout ATTIVO su %s (ID 0x%X)", gFrameName[fIdx], frameId);
+      break;
+
+    case 2: /* Checksum error */
+      if (gChkBitLen[fIdx] == 0)
+      {
+        write("[GatewayNOxHCU] ERRORE: %s (ID 0x%X) non ha un segnale di checksum configurato", gFrameName[fIdx], frameId);
+        return;
+      }
+      gChkErrFrameId  = frameId;
+      gChkErrFrameIdx = fIdx;
+      gChkErrActive   = 1;
+      write("[GatewayNOxHCU] Errore CHECKSUM attivo su %s (ID 0x%X)", gFrameName[fIdx], frameId);
+      break;
+
+    case 3: /* DLC error */
+      gDlcErrFrameId = frameId;
+      gDlcErrValue   = (byte)@sysvar::GatewaySimNOxHCU::DlcErrorValue;
+      gDlcErrActive  = 1;
+      write("[GatewayNOxHCU] Errore DLC attivo su %s (DLC forzato a %d)", gFrameName[fIdx], gDlcErrValue);
+      break;
+
+    case 4: /* Counter error - freeze */
+    case 5: /* Counter error - jump */
+      if (gCntBitLen[fIdx] == 0)
+      {
+        write("[GatewayNOxHCU] ERRORE: %s (ID 0x%X) non ha un segnale counter configurato", gFrameName[fIdx], frameId);
+        return;
+      }
+      gCntErrFrameId  = frameId;
+      gCntErrFrameIdx = fIdx;
+      gCntErrMode     = errType - 4; /* 0 = freeze, 1 = jump */
+      gCntFrozenValid = 0;
+      gCntErrActive   = 1;
+      if (gCntErrMode == 0)
+      {
+        write("[GatewayNOxHCU] Errore COUNTER (freeze) attivo su %s (ID 0x%X)", gFrameName[fIdx], frameId);
+      }
+      else
+      {
+        write("[GatewayNOxHCU] Errore COUNTER (jump) attivo su %s (ID 0x%X)", gFrameName[fIdx], frameId);
+      }
+      break;
+
+    default: /* 0 = Nessuno */
+      write("[GatewayNOxHCU] ErrorType = None, nessuna simulazione attivata");
+      break;
+  }
+}
+
+on sysvar_update sysvar::GatewaySimNOxHCU::ClearTrigger
+{
+  gTimeoutActive  = 0;
+  gTimeoutFrameId = -1;
+  cancelTimer(gTimeoutTimer);
+
+  gDlcErrActive  = 0;
+  gDlcErrFrameId = -1;
+
+  gChkErrActive   = 0;
+  gChkErrFrameId  = -1;
+  gChkErrFrameIdx = -1;
+
+  gCntErrActive   = 0;
+  gCntErrFrameId  = -1;
+  gCntErrFrameIdx = -1;
+  gCntFrozenValid = 0;
+
+  write("[GatewayNOxHCU] Simulazioni errore azzerate.");
+}
+
+on timer gTimeoutTimer
+{
+  gTimeoutActive  = 0;
+  gTimeoutFrameId = -1;
+  write("[GatewayNOxHCU] Timeout terminato, forwarding ripristinato.");
+}
