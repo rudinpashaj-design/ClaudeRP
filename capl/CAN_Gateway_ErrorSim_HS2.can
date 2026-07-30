@@ -49,13 +49,15 @@
       di HS1). Cambia i valori di kChanA/kChanB qui sotto per farli
       corrispondere ai canali fisici reali assegnati a HS2 nella Channel
       Mapping, e collega il nodo CAPL di questo script a quei due canali.
-   3) CHECKSUM: a differenza di HS1, qui NON e' stato fatto reverse
-      engineering di nessun algoritmo di checksum (serve una traccia bus
-      reale HS2, come e' stato fatto per HS1 - vedi RecomputeChecksum() piu'
-      sotto). Tutti i gChkTarget sono quindi 255 (non validato): la
-      simulazione errore counter sui frame con checksum invalidera' anche il
-      checksum come effetto collaterale, esattamente come succedeva
-      inizialmente su HS1 prima del reverse engineering.
+   3) CHECKSUM: reverse engineering completato il 29/07 per 6 degli 8 frame
+      candidati (CMM_228, MDD_ETAT_2B6, CMM_BV_2E8, STT_BV_329,
+      UCF_MDD_32D, CMM_408 - vedi SetChkTarget() in InitFrameTable()),
+      stesso algoritmo a somma di HS1. Restano non validati: UCF_2CD
+      (nessun campione nella traccia disponibile) e CLIM_50E (checksum di
+      soli 2 bit, l'ipotesi a somma di nibble non ha dato un risultato
+      coerente). Per questi due, la simulazione errore counter invalidera'
+      anche il checksum come effetto collaterale finche' non si trova
+      l'algoritmo giusto.
 
    INPUT UTENTE: SYSTEM VARIABLES DA CREARE (namespace SEPARATO da HS1)
    ------------------------------------------------------------------------
@@ -200,13 +202,25 @@ void InitFrameTable()
   AddFrame("DAT_CMM_5D8", 0x5D8, 2, 0, 0, 0, 0, 0, 0);
   AddFrame("BSI_5EE", 0x5EE, 1, 0, 0, 0, 0, 0, 0);
 
-  /* Nessuna SetChkTarget(): l'algoritmo di checksum per HS2 non e' ancora
-     stato determinato (vedi header). Frame con un segnale di checksum
-     individuato nel DBC, candidati per un futuro reverse engineering non
-     appena disponibile una traccia bus reale HS2:
-       CMM_228, MDD_ETAT_2B6, UCF_2CD, CMM_BV_2E8, STT_BV_329,
-       UCF_MDD_32D, CMM_408, CLIM_50E (quest'ultimo con checksum di soli
-       2 bit, non 4 come gli altri). */
+  /* Algoritmo di checksum a somma (identico a HS1, vedi RecomputeChecksum()
+     e SumAllNibblesExceptChecksum()) reverse-engineered da una traccia bus
+     reale HS2 (CAN_HS2_Logging_20260729_155551_T015.asc): somma di tutti i
+     nibble del frame (dati + counter + checksum) mod 16 = costante per ID.
+     Verificato con zero incoerenze su centinaia/migliaia di campioni per
+     ciascuno dei 6 frame sotto. */
+  SetChkTarget(0x228, 3);
+  SetChkTarget(0x2B6, 12);
+  SetChkTarget(0x2E8, 3);
+  SetChkTarget(0x329, 13);
+  SetChkTarget(0x32D, 13);
+  SetChkTarget(0x408, 3);
+
+  /* UCF_2CD (0x2CD): nessun campione nella traccia disponibile (nodo UCF
+     non visto trasmettere questo ID) - target non ancora determinato.
+     CLIM_50E (0x50E): checksum di soli 2 bit, non 4 come gli altri;
+     l'ipotesi "somma nibble mod 16" non e' risultata coerente (provata
+     anche mod 4, idem) - probabilmente un algoritmo diverso (es. CRC/
+     parita' a 2 bit), da approfondire con dati aggiuntivi se necessario. */
 }
 
 void AddFrame(char name[], dword id, byte originCan, byte chkByte, byte chkBit, byte chkLen,
