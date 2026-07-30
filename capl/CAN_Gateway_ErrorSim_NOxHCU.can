@@ -42,11 +42,17 @@
       inversione gia' vista, per motivi diversi, su HS1 e HS2 (terza volta
       di fila che l'assunzione di partenza si rivela invertita). La tabella
       sotto e' stata invertita di conseguenza (originCan 1<->2 su tutte le
-      18 righe): ora ECM ha originCan=2 e tutti gli altri nodi hanno
-      originCan=1. Nessun frame degli altri nodi e' ancora comparso in una
-      traccia reale: se in futuro emergono su un canale diverso da 1,
-      riverificare. Se si preferisce evitare la confusione derivante dal
-      disallineamento fisico/software, si puo' anche correggere il Channel
+      18 righe): ECM ha originCan=2 e tutti gli altri nodi hanno originCan=1.
+      CONFERMATO anche per gli altri nodi il 30/07 su una seconda traccia
+      reale (CAN_NOxHCUPC_Logging_20260730_110721_T019.asc, dopo la
+      correzione di un secondo problema fisico separato: pin CAN1 invertiti
+      sul connettore): 13 dei 18 ID del DBC visti attivi, ciascuno nativo su
+      un solo canale (i 5 ECM su canale 2, gli 8 degli altri nodi - 0x159,
+      0x160, 0x249, 0x250, 0x251, 0x311, 0x389, 0x3A9 - su canale 1), zero
+      conflitti, zero ErrorFrame/bus-off in tutta la traccia. Mancano solo i
+      5 frame XCP (0x630-0x633, 0x637), normale: compaiono solo durante una
+      sessione di calibrazione attiva. Se si preferisce evitare la confusione
+      derivante dal disallineamento fisico/software, si puo' anche correggere il Channel
       Mapping in CANalyzer invece di lasciare l'inversione nello script.
    2) NUMERI DI CANALE: se questo script gira INSIEME a quelli HS1/HS2 nella
       STESSA misurazione, i canali fisici di questa rete probabilmente NON
