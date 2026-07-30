@@ -29,19 +29,25 @@
 
    ATTENZIONE - COSE DA VERIFICARE PRIMA DELL'USO SU QUESTA RETE
    -----------------------------------------------------------------
-   1) MAPPATURA CANALI FISICI: la tabella sotto assume che il canale fisico
-      "A" (kChanA, default 1) sia quello dove ECM trasmette nativamente i
-      suoi frame, e il canale "B" (kChanB, default 2) quello di tutti gli
-      altri nodi (SCU, HCUPC, EGSNXUpStream_B1, EGSNXMidStream_B1,
-      EGSNXDwnStream_B1, TSTR) - e' l'assunzione diretta dal campo "sender"
-      del DBC, la STESSA assunzione di partenza usata inizialmente per HS1 e
-      HS2, che in ENTRAMBI i casi si e' poi rivelata INVERTITA rispetto alla
-      realta' una volta verificata con una traccia bus vera. NON dare per
-      scontato che qui sia corretta: appena hai una prima traccia reale di
-      questa rete, controlla su quale canale fisico arrivano nativamente i
-      frame ECM (0x150, 0x158, 0x309, 0x385, 0x3A5) e quali arrivano gli
-      altri nodi, ed eventualmente inverti i valori "originCan" nella
-      tabella (1<->2) come gia' fatto per HS1 e HS2.
+   1) MAPPATURA CANALI FISICI: CORRETTA il 30/07 sulla base di una traccia
+      bus reale (CAN_NOxHCUPC_Logging_20260730_103603_T013.asc). La traccia
+      mostrava i 5 frame ECM (0x150, 0x158, 0x309, 0x385, 0x3A5) taggati
+      come canale SOFTWARE 2 in CANalyzer, zero traffico sul canale 1 - il
+      contrario dell'assunzione diretta da DBC. L'utente ha confermato che
+      fisicamente/via cablaggio ECM e' sul connettore "CAN1": la causa piu'
+      probabile e' un disallineamento tra l'etichetta fisica del cablaggio e
+      la numerazione software dei canali nel Channel Mapping di CANalyzer
+      (la porta del VN1640 dove e' collegato il connettore "CAN1" risulta
+      mappata come "Channel 2" in CANalyzer) - la STESSA dinamica di
+      inversione gia' vista, per motivi diversi, su HS1 e HS2 (terza volta
+      di fila che l'assunzione di partenza si rivela invertita). La tabella
+      sotto e' stata invertita di conseguenza (originCan 1<->2 su tutte le
+      18 righe): ora ECM ha originCan=2 e tutti gli altri nodi hanno
+      originCan=1. Nessun frame degli altri nodi e' ancora comparso in una
+      traccia reale: se in futuro emergono su un canale diverso da 1,
+      riverificare. Se si preferisce evitare la confusione derivante dal
+      disallineamento fisico/software, si puo' anche correggere il Channel
+      Mapping in CANalyzer invece di lasciare l'inversione nello script.
    2) NUMERI DI CANALE: se questo script gira INSIEME a quelli HS1/HS2 nella
       STESSA misurazione, i canali fisici di questa rete probabilmente NON
       saranno 1 e 2. Cambia i valori di kChanA/kChanB qui sotto per farli
@@ -103,9 +109,9 @@ variables
   const int kMaxFrames = 24;
   char  gFrameName[24][51];
   dword gFrameId[24];
-  /* 1 = origine canale A, 2 = origine canale B. Vedi nota "DA VERIFICARE"
-     nell'header: qui e' l'assunzione diretta da DBC (ECM -> A, altri -> B),
-     NON ancora confermata da una traccia bus reale di questa rete. */
+  /* 1 = origine canale A, 2 = origine canale B. Verificato/corretto il
+     30/07 su traccia bus reale (vedi nota in cima al file): ECM -> B (2),
+     altri nodi -> A (1) - INVERTITO rispetto all'assunzione diretta da DBC. */
   byte  gFrameOriginCan[24];
   byte  gChkByteIdx[24];
   byte  gChkBitStart[24];
@@ -162,33 +168,34 @@ void InitFrameTable()
 {
   /* ============================================================
      Tabella generata da: NOx_HCU_PM_v3.dbc
-     18 frame totali (5 trasmessi da ECM -> canale A, 13 dagli altri nodi
-     -> canale B). Parametri:
+     18 frame totali (5 trasmessi da ECM -> canale B/2, 13 dagli altri nodi
+     -> canale A/1). Parametri:
        AddFrame(nome, ID, originCan, chkByte, chkBit, chkLen, cntByte, cntBit, cntLen)
      chkLen e cntLen sono sempre 0: questo DBC non contiene nessun segnale
      di checksum ne' di rolling counter (vedi punto 3 dell'header).
-     originCan e' l'assunzione diretta dal campo sender del DBC, NON ancora
-     verificata su una traccia bus reale di questa rete (vedi header).
+     originCan: verificato/corretto il 30/07 su traccia bus reale (vedi
+     nota in cima al file) - INVERTITO rispetto all'assunzione diretta dal
+     campo sender del DBC.
      ============================================================ */
 
-  AddFrame("PM_Rx",                          0x150, 1, 0, 0, 0, 0, 0, 0); /* ECM */
-  AddFrame("ECU_data_reqst_HCUPC",           0x158, 1, 0, 0, 0, 0, 0, 0); /* ECM */
-  AddFrame("HCUPC_data1_Resp_ecu",           0x159, 2, 0, 0, 0, 0, 0, 0); /* HCUPC */
-  AddFrame("HCUPC_diag_data_Resp_ecu",       0x160, 2, 0, 0, 0, 0, 0, 0); /* HCUPC */
-  AddFrame("PM_TxDiag",                      0x249, 2, 0, 0, 0, 0, 0, 0); /* SCU */
-  AddFrame("PM_TxPhys",                      0x250, 2, 0, 0, 0, 0, 0, 0); /* SCU */
-  AddFrame("PM_TxInfo",                      0x251, 2, 0, 0, 0, 0, 0, 0); /* SCU */
-  AddFrame("Eng_Data_EGSNXUpStream_B1_Rqst", 0x309, 1, 0, 0, 0, 0, 0, 0); /* ECM */
-  AddFrame("EGSNXUpStream_B1_data_1",        0x311, 2, 0, 0, 0, 0, 0, 0); /* EGSNXUpStream_B1 */
-  AddFrame("Eng_Data_EGSNXMidStream_B1_Rqst",0x385, 1, 0, 0, 0, 0, 0, 0); /* ECM */
-  AddFrame("EGSNXMidStream_B1_data_1",       0x389, 2, 0, 0, 0, 0, 0, 0); /* EGSNXMidStream_B1 */
-  AddFrame("Eng_Data_EGSNXDwnStream_B1_Rqst",0x3A5, 1, 0, 0, 0, 0, 0, 0); /* ECM */
-  AddFrame("EGSNXDwnStream_B1_data_1",       0x3A9, 2, 0, 0, 0, 0, 0, 0); /* EGSNXDwnStream_B1 */
-  AddFrame("XCPTx",                          0x630, 2, 0, 0, 0, 0, 0, 0); /* EGSNX*_B1 (XCP) */
-  AddFrame("XCP_DAQ0",                       0x631, 2, 0, 0, 0, 0, 0, 0); /* EGSNX*_B1 (XCP) */
-  AddFrame("XCP_DAQ1",                       0x632, 2, 0, 0, 0, 0, 0, 0); /* EGSNX*_B1 (XCP) */
-  AddFrame("XCP_DAQ2",                       0x633, 2, 0, 0, 0, 0, 0, 0); /* EGSNX*_B1 (XCP) */
-  AddFrame("XCPRx",                          0x637, 2, 0, 0, 0, 0, 0, 0); /* TSTR */
+  AddFrame("PM_Rx",                          0x150, 2, 0, 0, 0, 0, 0, 0); /* ECM */
+  AddFrame("ECU_data_reqst_HCUPC",           0x158, 2, 0, 0, 0, 0, 0, 0); /* ECM */
+  AddFrame("HCUPC_data1_Resp_ecu",           0x159, 1, 0, 0, 0, 0, 0, 0); /* HCUPC */
+  AddFrame("HCUPC_diag_data_Resp_ecu",       0x160, 1, 0, 0, 0, 0, 0, 0); /* HCUPC */
+  AddFrame("PM_TxDiag",                      0x249, 1, 0, 0, 0, 0, 0, 0); /* SCU */
+  AddFrame("PM_TxPhys",                      0x250, 1, 0, 0, 0, 0, 0, 0); /* SCU */
+  AddFrame("PM_TxInfo",                      0x251, 1, 0, 0, 0, 0, 0, 0); /* SCU */
+  AddFrame("Eng_Data_EGSNXUpStream_B1_Rqst", 0x309, 2, 0, 0, 0, 0, 0, 0); /* ECM */
+  AddFrame("EGSNXUpStream_B1_data_1",        0x311, 1, 0, 0, 0, 0, 0, 0); /* EGSNXUpStream_B1 */
+  AddFrame("Eng_Data_EGSNXMidStream_B1_Rqst",0x385, 2, 0, 0, 0, 0, 0, 0); /* ECM */
+  AddFrame("EGSNXMidStream_B1_data_1",       0x389, 1, 0, 0, 0, 0, 0, 0); /* EGSNXMidStream_B1 */
+  AddFrame("Eng_Data_EGSNXDwnStream_B1_Rqst",0x3A5, 2, 0, 0, 0, 0, 0, 0); /* ECM */
+  AddFrame("EGSNXDwnStream_B1_data_1",       0x3A9, 1, 0, 0, 0, 0, 0, 0); /* EGSNXDwnStream_B1 */
+  AddFrame("XCPTx",                          0x630, 1, 0, 0, 0, 0, 0, 0); /* EGSNX*_B1 (XCP) */
+  AddFrame("XCP_DAQ0",                       0x631, 1, 0, 0, 0, 0, 0, 0); /* EGSNX*_B1 (XCP) */
+  AddFrame("XCP_DAQ1",                       0x632, 1, 0, 0, 0, 0, 0, 0); /* EGSNX*_B1 (XCP) */
+  AddFrame("XCP_DAQ2",                       0x633, 1, 0, 0, 0, 0, 0, 0); /* EGSNX*_B1 (XCP) */
+  AddFrame("XCPRx",                          0x637, 1, 0, 0, 0, 0, 0, 0); /* TSTR */
 
   /* Nessuna SetChkTarget(): nessun frame di questa rete ha un segnale di
      checksum (vedi punto 3 dell'header). */
