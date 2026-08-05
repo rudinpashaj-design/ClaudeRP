@@ -1,0 +1,257 @@
+/*@@author(-)*/
+/*@@version(1.0)*/
+
+/* ============================================================================
+   CAN GATEWAY BIDIREZIONALE  CAN1 <-> CAN2  (CANalyzer 18)
+   + MODIFICA DEL SEGNALE "TotalOdometer" SUL FRAME CLUSTER1 (0x259)
+   ============================================================================
+
+   DBC di riferimento:
+     P250MY26_C1CANCAN_R1_E1A_CR20190.dbc
+
+   COSA FA
+   -------
+   Fa da "ponte" (gateway) che ribalta TUTTI i frame circolanti tra i due
+   canali:
+
+     - CAN1 -> CAN2 : tutto cio' che arriva su CAN1 (i frame del solo nodo
+                      ECM) viene ritrasmesso su CAN2;
+     - CAN2 -> CAN1 : tutto cio' che arriva su CAN2 (i frame di tutti gli
+                      altri nodi) viene ritrasmesso su CAN1.
+
+   L'inoltro e' "passthrough" completo: viene ribaltato QUALSIASI ID, anche
+   quelli non presenti nel DBC. La direzione e' decisa automaticamente in
+   base al canale di ricezione (this.can), quindi non serve nessun filtro
+   per nodo: dato che ECM trasmette solo su CAN1 e gli altri nodi solo su
+   CAN2, l'inoltro simmetrico realizza gia' esattamente lo scenario richiesto.
+
+   ECCEZIONE - FRAME CLUSTER1 (0x259)
+   ----------------------------------
+   Il frame CLUSTER1 (ID 0x259 = 601 dec) porta il segnale TotalOdometer
+   (23|20@0+, big-endian/Motorola, 20 bit, unita' km, range 0..1048575).
+   Prima di essere ritrasmesso, il valore di TotalOdometer viene modificato
+   secondo la modalita' scelta (vedi gOdoMode piu' sotto). La modifica
+   avviene qualunque sia il canale su cui il frame viene ricevuto: si aggancia
+   all'ID, non al canale, quindi funziona sia che 0x259 arrivi da CAN2 (come
+   da DBC, dove CLUSTER1 e' trasmesso dal nodo IPC) sia che nel tuo banco
+   arrivi dal lato ECM/CAN1.
+
+   La riscrittura del segnale usa l'accesso SIMBOLICO (message CLUSTER1 +
+   .TotalOdometer): cosi' il packing Motorola a 20 bit e' gestito
+   automaticamente dal database, senza manipolare i byte a mano.
+
+   COME MODIFICARE IL VALORE DI TotalOdometer
+   ------------------------------------------
+   Tre modalita', selezionabili con la variabile gOdoMode (default = 1):
+     gOdoMode = 0  -> PASSTHROUGH: il frame passa senza modifiche.
+     gOdoMode = 1  -> OVERRIDE:    forza TotalOdometer = gOdoValue (km).
+     gOdoMode = 2  -> OFFSET:      TotalOdometer = valore_ricevuto + gOdoOffset
+                                   (gOdoOffset e' con segno, in km).
+   I valori si possono cambiare a compile-time (qui sotto) oppure a runtime
+   con i tasti nella Write Window (vedi handler "on key" in fondo).
+
+   SETUP IN CANALYZER 18
+   ---------------------
+   1) Assegna questo DBC ai DUE canali (CAN Network 1 e CAN Network 2) nella
+      Networks/Databases della Measurement Setup, oppure ai due canali fisici
+      che usi come CAN1/CAN2.
+   2) Inserisci questo nodo CAPL nella Measurement Setup e collegalo a
+      ENTRAMBI i canali (deve poter ricevere e trasmettere su CAN1 e CAN2).
+   3) Se i canali fisici NON sono i numeri 1 e 2, aggiorna kChanCAN1/kChanCAN2
+      qui sotto in modo che corrispondano alla Channel Mapping reale.
+   ============================================================================ */
+
+variables
+{
+  /* -------- Numeri di canale ------------------------------------------------
+     Cambiali se nella Channel Mapping i canali fisici usati come CAN1/CAN2
+     non sono 1 e 2. L'inoltro e' comunque simmetrico (opposto del canale di
+     ricezione), quindi la sola cosa che conta e' che questi due valori
+     corrispondano ai due canali collegati al nodo CAPL. */
+  const dword kChanCAN1 = 1;   /* lato ECM        */
+  const dword kChanCAN2 = 2;   /* lato altri nodi */
+
+  /* -------- Frame speciale: CLUSTER1 --------------------------------------- */
+  const dword kIdCluster1 = 0x259;   /* 601 dec */
+  const dword kOdoMax     = 1048575; /* 20 bit -> valore massimo del segnale  */
+
+  /* -------- Modalita' di modifica di TotalOdometer -------------------------
+     0 = passthrough, 1 = override (forza gOdoValue), 2 = offset (+gOdoOffset). */
+  int   gOdoMode   = 1;
+  dword gOdoValue  = 100000;   /* km da forzare in modalita' OVERRIDE          */
+  long  gOdoOffset = 0;        /* km (con segno) da sommare in modalita' OFFSET */
+
+  /* -------- Anti-eco / anti-loop ------------------------------------------
+     Il frame appena ritrasmesso da questo stesso programma genera un evento
+     TX che rientra in "on message *": lo scartiamo con this.dir != RX e con
+     questo guard di rientranza, evitando il loop di inoltro A->B->A->... */
+  dword gInForward = 0;
+
+  /* Messaggio generico riusato per l'inoltro passthrough (ID impostato a
+     runtime: la dichiarazione con 0x000 crea un messaggio scrivibile). */
+  message 0x000 gTxMsg;
+}
+
+
+on start
+{
+  write("=====================================================================");
+  write(" Gateway CAN1<->CAN2 attivo. Ribalto tutti i frame tra i due canali.");
+  write(" Frame CLUSTER1 (0x259): modifica TotalOdometer -> vedi 'on key'.");
+  LogOdoMode();
+  write("=====================================================================");
+}
+
+
+/* ============================================================================
+   GATEWAY  +  MODIFICA TotalOdometer SU CLUSTER1 (0x259)
+   ============================================================================ */
+on message *
+{
+  int           i;
+  dword         targetChannel;
+  message CLUSTER1 clu;   /* usato solo per il frame 0x259 (accesso simbolico) */
+  dword         newVal;
+  long          tmp;
+
+  /* Inoltra solo i frame realmente RICEVUTI dal bus, non quelli che
+     trasmettiamo noi (altrimenti si crea un loop). */
+  if (this.dir != RX)
+  {
+    return;
+  }
+  if (gInForward == 1)
+  {
+    return;
+  }
+
+  /* Direzione: sempre il canale opposto a quello di ricezione. */
+  if (this.can == kChanCAN1)
+  {
+    targetChannel = kChanCAN2;
+  }
+  else if (this.can == kChanCAN2)
+  {
+    targetChannel = kChanCAN1;
+  }
+  else
+  {
+    return;   /* frame su un canale che non fa parte del gateway */
+  }
+
+  /* ---- CASO SPECIALE: CLUSTER1 (0x259) -----------------------------------
+     Modifica TotalOdometer con accesso simbolico prima di ritrasmettere.
+     Si aggancia all'ID, quindi vale in entrambe le direzioni. */
+  if (this.id == kIdCluster1)
+  {
+    clu = this;                 /* copia id/dlc/dati del frame ricevuto */
+    clu.can = targetChannel;
+    clu.dir = TX;
+
+    if (gOdoMode == 1)
+    {
+      /* OVERRIDE: forza il valore configurato (con clamp a 20 bit). */
+      newVal = gOdoValue;
+      if (newVal > kOdoMax) newVal = kOdoMax;
+      clu.TotalOdometer = newVal;
+    }
+    else if (gOdoMode == 2)
+    {
+      /* OFFSET: somma (con segno) al valore ricevuto, con clamp 0..max. */
+      tmp = (long) clu.TotalOdometer + gOdoOffset;
+      if (tmp < 0)              tmp = 0;
+      if (tmp > (long) kOdoMax) tmp = kOdoMax;
+      clu.TotalOdometer = tmp;
+    }
+    /* gOdoMode == 0: passthrough, nessuna modifica */
+
+    gInForward = 1;
+    output(clu);
+    gInForward = 0;
+    return;
+  }
+
+  /* ---- INOLTRO GENERICO (passthrough) di tutti gli altri frame ------------ */
+  gTxMsg.id  = this.id;
+  gTxMsg.dlc = this.dlc;
+  gTxMsg.dir = TX;
+  gTxMsg.can = targetChannel;
+
+  for (i = 0; i < this.dlc && i < 8; i = i + 1)
+  {
+    gTxMsg.byte(i) = this.byte(i);
+  }
+
+  gInForward = 1;
+  output(gTxMsg);
+  gInForward = 0;
+}
+
+
+/* ============================================================================
+   CONTROLLO A RUNTIME DEL VALORE TotalOdometer (Write Window)
+   ============================================================================
+   Tasti (con il focus sulla finestra Write / Measurement):
+     o : cicla la modalita' 0 -> 1 -> 2 -> 0 (passthrough / override / offset)
+     + : +1000 km al valore forzato (OVERRIDE) o all'offset (OFFSET)
+     - : -1000 km al valore forzato (OVERRIDE) o all'offset (OFFSET)
+     0 : azzera valore forzato / offset
+   ============================================================================ */
+
+on key 'o'
+{
+  gOdoMode = (gOdoMode + 1) % 3;
+  LogOdoMode();
+}
+
+on key '+'
+{
+  if (gOdoMode == 2)
+  {
+    gOdoOffset = gOdoOffset + 1000;
+  }
+  else
+  {
+    if (gOdoValue + 1000 > kOdoMax) gOdoValue = kOdoMax;
+    else                            gOdoValue = gOdoValue + 1000;
+  }
+  LogOdoMode();
+}
+
+on key '-'
+{
+  if (gOdoMode == 2)
+  {
+    gOdoOffset = gOdoOffset - 1000;
+  }
+  else
+  {
+    if (gOdoValue < 1000) gOdoValue = 0;
+    else                  gOdoValue = gOdoValue - 1000;
+  }
+  LogOdoMode();
+}
+
+on key '0'
+{
+  gOdoValue  = 0;
+  gOdoOffset = 0;
+  LogOdoMode();
+}
+
+
+void LogOdoMode()
+{
+  if (gOdoMode == 0)
+  {
+    write("[Odometer] modalita' = PASSTHROUGH (nessuna modifica su 0x259)");
+  }
+  else if (gOdoMode == 1)
+  {
+    write("[Odometer] modalita' = OVERRIDE, TotalOdometer forzato = %d km", gOdoValue);
+  }
+  else
+  {
+    write("[Odometer] modalita' = OFFSET, delta = %d km", gOdoOffset);
+  }
+}
