@@ -1,0 +1,376 @@
+/*@@author(-)*/
+/*@@version(1.0)*/
+
+/* ============================================================================
+   CAN GATEWAY BIDIREZIONALE  CAN1 <-> CAN2  (CANalyzer 18)
+   + MANIPOLAZIONE UNIVERSALE DI QUALSIASI SEGNALE DEL DBC DA PANNELLO
+   ============================================================================
+
+   DBC di riferimento:
+     P250MY26_C1CANCAN_R1_E1A_CR20190.dbc
+
+   COSA FA
+   -------
+   1) Ribalta TUTTI i frame circolanti tra i due canali (passthrough):
+        - CAN1 -> CAN2 : tutto cio' che arriva su CAN1 (nodo ECM) va su CAN2;
+        - CAN2 -> CAN1 : tutto cio' che arriva su CAN2 (altri nodi) va su CAN1.
+      La direzione e' decisa dal canale di ricezione, quindi l'inoltro
+      simmetrico realizza gia' lo scenario ECM/altri nodi. Guard anti-eco
+      (this.dir==RX + gInForward) per evitare loop di reinoltro.
+
+   2) Permette di SELEZIONARE DA PANNELLO qualsiasi frame+segnale del DBC e
+      IMPOSTARNE IL VALORE: quando quel frame transita nel gateway, il segnale
+      scelto viene riscritto col valore impostato prima della ritrasmissione.
+      Funziona per QUALSIASI segnale (Intel/Motorola, signed/unsigned, con
+      fattore/offset), grazie a un writer generico di bit.
+
+   ARCHITETTURA (perche' cosi')
+   ----------------------------
+   Un Panel di CANalyzer non puo' popolarsi dinamicamente dal DBC. Quindi:
+     - il catalogo dei segnali (ID frame, start bit, lunghezza, byte order,
+       signed, factor/offset, min/max) e' GENERATO dal DBC nel file incluso
+       "dbc_signal_meta.cin" (solo array numerici indicizzati 0..gMetaCount-1);
+     - la TENDINA PER NOME e' una System Variable enum "GwManip::Signal"
+       (file "GatewayManip_SysVars.vsysvar"): ogni voce "Frame.Signal (0xID)"
+       ha come valore l'INDICE nel catalogo. Selezioni per nome -> ottieni
+       l'indice -> il CAPL sa dove/come scrivere.
+   I due file sono generati insieme e condividono lo stesso indice. Se le
+   etichette della tendina non comparissero nella tua versione, il sistema
+   funziona comunque per indice: la corrispondenza indice<->segnale e i
+   valori enum sono documentati in "dbc_signal_index.md" e
+   "dbc_value_tables.md".
+
+   SETUP IN CANALYZER 18
+   ---------------------
+   1) Assegna il DBC ai DUE canali (CAN 1 e CAN 2) della Measurement Setup.
+   2) Importa le System Variables: menu Environment > System Variables >
+      Import, seleziona "GatewayManip_SysVars.vsysvar" (namespace GwManip).
+   3) Inserisci questo nodo CAPL e collegalo a ENTRAMBI i canali. Assicurati
+      che "dbc_signal_meta.cin" sia nella stessa cartella del .can.
+   4) Crea un Panel (Panel Designer) con:
+        - una COMBO BOX collegata a  GwManip::Signal      (tendina per nome)
+        - un campo INPUT collegato a  GwManip::PhysValue   (valore da imporre)
+        - un check/box collegato a    GwManip::UseRaw      (0=fisico, 1=grezzo)
+        - un PULSANTE che scrive/incrementa  GwManip::Apply (applica)
+        - un PULSANTE che scrive/incrementa  GwManip::Clear (disattiva tutto)
+      (Se preferisci non creare il Panel, puoi impostare le stesse System
+       Variables dalla finestra System Variables e usare i pulsanti li'.)
+
+   USO
+   ---
+   - Seleziona il segnale dalla tendina: nella Write Window compaiono subito
+     i dati del segnale (range, se ha enum, ecc.).
+   - Scrivi il valore in PhysValue (valore FISICO; se il segnale ha una value
+     table, usa uno dei valori enum documentati in dbc_value_tables.md).
+   - Premi Apply: da quel momento ogni transito di quel frame avra' il segnale
+     forzato. Puoi applicare piu' segnali (anche su frame diversi).
+   - Premi Clear per rimuovere tutti gli override.
+   ============================================================================ */
+
+includes
+{
+  #include "dbc_signal_meta.cin"
+}
+
+variables
+{
+  /* -------- Numeri di canale (adegua se la Channel Mapping usa altri) ------ */
+  const dword kChanCAN1 = 1;   /* lato ECM        */
+  const dword kChanCAN2 = 2;   /* lato altri nodi */
+
+  /* -------- Anti-eco / anti-loop ------------------------------------------ */
+  dword gInForward = 0;
+  message 0x000 gTxMsg;        /* messaggio riusato per l'inoltro            */
+
+  /* -------- Tabella degli override attivi --------------------------------- */
+  const int kMaxAct = 64;      /* max segnali forzati contemporaneamente     */
+  int   gActCount = 0;
+  int   gActSigIdx[64];        /* indice nel catalogo (gMeta*)               */
+  int64 gActRaw[64];           /* valore grezzo gia' calcolato da imporre    */
+}
+
+
+on start
+{
+  gActCount = 0;
+  write("=====================================================================");
+  write(" Gateway CAN1<->CAN2 + manipolazione segnali DBC attivo.");
+  write(" Catalogo: %d segnali. Seleziona in GwManip::Signal, imposta", gMetaCount);
+  write(" GwManip::PhysValue e premi Apply. Clear per azzerare tutto.");
+  write("=====================================================================");
+}
+
+
+/* ============================================================================
+   GATEWAY: ribalta ogni frame e applica gli override attivi
+   ============================================================================ */
+on message *
+{
+  int   i;
+  int   a;
+  int   idx;
+  dword targetChannel;
+  dword rxId;
+
+  if (this.dir != RX)   return;   /* non reinoltrare cio' che trasmettiamo noi */
+  if (gInForward == 1)  return;
+
+  if (this.can == kChanCAN1)      targetChannel = kChanCAN2;
+  else if (this.can == kChanCAN2) targetChannel = kChanCAN1;
+  else return;
+
+  /* copia del frame ricevuto verso il canale opposto */
+  gTxMsg.id  = this.id;
+  gTxMsg.dlc = this.dlc;
+  gTxMsg.dir = TX;
+  gTxMsg.can = targetChannel;
+  for (i = 0; i < this.dlc && i < 8; i = i + 1)
+  {
+    gTxMsg.byte(i) = this.byte(i);
+  }
+
+  /* applica tutti gli override che riguardano questo frame */
+  rxId = this.id & 0x1FFFFFFF;
+  for (a = 0; a < gActCount; a = a + 1)
+  {
+    idx = gActSigIdx[a];
+    if (gMetaMsgId[idx] == rxId)
+    {
+      WriteSignalRaw(gMetaOrder[idx], gMetaStart[idx], gMetaLen[idx], gActRaw[a]);
+    }
+  }
+
+  gInForward = 1;
+  output(gTxMsg);
+  gInForward = 0;
+}
+
+
+/* ============================================================================
+   PANNELLO: selezione, applicazione, azzeramento
+   ============================================================================ */
+
+/* Cambio selezione nella tendina -> mostra le info del segnale scelto. */
+on sysvar GwManip::Signal
+{
+  PrintSignalInfo(sysGetVariableInt("GwManip", "Signal"));
+}
+
+/* Applica il valore impostato al segnale selezionato. */
+on sysvar GwManip::Apply
+{
+  DoApply();
+}
+
+/* Disattiva tutti gli override. */
+on sysvar GwManip::Clear
+{
+  gActCount = 0;
+  write("[Manip] tutti gli override disattivati.");
+}
+
+
+/* ---------------------------------------------------------------------------
+   Applica: legge la selezione e il valore, calcola il grezzo, aggiorna la
+   tabella degli override.
+   --------------------------------------------------------------------------- */
+void DoApply()
+{
+  int    idx;
+  int    useRaw;
+  int    a;
+  int    slot;
+  double phys;
+  int64  raw;
+
+  idx    = sysGetVariableInt("GwManip", "Signal");
+  useRaw = sysGetVariableInt("GwManip", "UseRaw");
+  phys   = sysGetVariableFloat("GwManip", "PhysValue");
+
+  if (idx < 0 || idx >= gMetaCount)
+  {
+    write("[Manip] indice segnale non valido: %d", idx);
+    return;
+  }
+
+  if (useRaw == 1)
+  {
+    if (phys >= 0) raw = (int64)(phys + 0.5);
+    else           raw = (int64)(phys - 0.5);
+  }
+  else
+  {
+    raw = PhysToRaw(idx, phys);
+    /* avviso se fuori dal range fisico dichiarato nel DBC */
+    if (phys < gMetaMin[idx] || phys > gMetaMax[idx])
+    {
+      write("[Manip] ATTENZIONE: %g fuori range DBC [%g .. %g] (verra' troncato ai bit).",
+            phys, gMetaMin[idx], gMetaMax[idx]);
+    }
+  }
+
+  raw = ClampRaw(idx, raw);
+
+  /* inserisci o aggiorna la riga per questo segnale */
+  slot = -1;
+  for (a = 0; a < gActCount; a = a + 1)
+  {
+    if (gActSigIdx[a] == idx) slot = a;
+  }
+  if (slot < 0)
+  {
+    if (gActCount >= kMaxAct)
+    {
+      write("[Manip] tabella override piena (max %d).", kMaxAct);
+      return;
+    }
+    slot = gActCount;
+    gActCount = gActCount + 1;
+  }
+  gActSigIdx[slot] = idx;
+  gActRaw[slot]    = raw;
+
+  write("[Manip] OVERRIDE attivo: frame 0x%X, segnale idx %d, raw=%.0f (phys=%g).",
+        gMetaMsgId[idx], idx, (double)raw, phys);
+}
+
+
+/* ---------------------------------------------------------------------------
+   Stampa le info DBC del segnale selezionato.
+   --------------------------------------------------------------------------- */
+void PrintSignalInfo(int idx)
+{
+  char ord[16];
+  char sgn[16];
+
+  if (idx < 0 || idx >= gMetaCount)
+  {
+    return;
+  }
+
+  if (gMetaOrder[idx] == 1)  strncpy(ord, "Intel", 16);
+  else                       strncpy(ord, "Motorola", 16);
+  if (gMetaSigned[idx] == 1) strncpy(sgn, "signed", 16);
+  else                       strncpy(sgn, "unsigned", 16);
+
+  write("[Manip] sel idx %d: frame 0x%X, start %d, len %d, %s, %s, factor=%g, offset=%g, range=[%g..%g]",
+        idx,
+        gMetaMsgId[idx],
+        gMetaStart[idx],
+        gMetaLen[idx],
+        ord,
+        sgn,
+        gMetaFactor[idx],
+        gMetaOffset[idx],
+        gMetaMin[idx],
+        gMetaMax[idx]);
+
+  if (gMetaHasVT[idx] == 1)
+  {
+    write("        (questo segnale ha una value table: valori enum in dbc_value_tables.md)");
+  }
+}
+
+
+/* ---------------------------------------------------------------------------
+   Conversione valore fisico -> grezzo:  raw = round((phys - offset)/factor)
+   --------------------------------------------------------------------------- */
+int64 PhysToRaw(int idx, double phys)
+{
+  double f;
+  double o;
+  double r;
+
+  f = gMetaFactor[idx];
+  o = gMetaOffset[idx];
+  if (f == 0.0) f = 1.0;
+
+  r = (phys - o) / f;
+  if (r >= 0) return (int64)(r + 0.5);
+  return (int64)(r - 0.5);
+}
+
+
+/* ---------------------------------------------------------------------------
+   Limita il grezzo al range rappresentabile in "len" bit (signed/unsigned).
+   --------------------------------------------------------------------------- */
+int64 ClampRaw(int idx, int64 raw)
+{
+  byte  len;
+  qword mask;
+  int64 smax;
+  int64 smin;
+
+  len = gMetaLen[idx];
+  if (len >= 64) return raw;                 /* nessun clamp: usa 64 bit pieni */
+
+  mask = ((qword)1 << len) - 1;
+
+  if (gMetaSigned[idx] == 1)
+  {
+    smax = (int64)(mask >> 1);               /* 2^(len-1) - 1 */
+    smin = -smax - 1;                        /* -2^(len-1)    */
+    if (raw > smax) raw = smax;
+    if (raw < smin) raw = smin;
+  }
+  else
+  {
+    if (raw < 0) raw = 0;
+    if ((qword)raw > mask) raw = (int64)mask;
+  }
+  return raw;
+}
+
+
+/* ---------------------------------------------------------------------------
+   Writer generico: scrive "rawVal" nel segnale (order/start/len) dentro gTxMsg.
+   order: 1 = Intel/little-endian, 0 = Motorola/big-endian.
+   --------------------------------------------------------------------------- */
+void WriteSignalRaw(byte order, byte startBit, byte len, int64 rawVal)
+{
+  qword mask;
+  qword raw;
+  int   i;
+  int   idx;
+  byte  bitVal;
+
+  if (len == 0) return;
+
+  if (len >= 64) mask = 0xFFFFFFFFFFFFFFFF;
+  else           mask = ((qword)1 << len) - 1;
+  raw = ((qword)rawVal) & mask;
+
+  if (order == 1)
+  {
+    /* Intel / little-endian: bit 0 (LSB) allo start bit, poi crescente. */
+    idx = startBit;
+    for (i = 0; i < len; i = i + 1)
+    {
+      bitVal = (byte)((raw >> i) & 1);
+      SetBit(idx / 8, idx % 8, bitVal);
+      idx = idx + 1;
+    }
+  }
+  else
+  {
+    /* Motorola / big-endian (sawtooth): start bit = MSB; scendendo di
+       significativita' si decrementa il bit, saltando +15 al cambio byte. */
+    idx = startBit;
+    for (i = len - 1; i >= 0; i = i - 1)
+    {
+      bitVal = (byte)((raw >> i) & 1);
+      SetBit(idx / 8, idx % 8, bitVal);
+      if ((idx % 8) == 0) idx = idx + 15;
+      else                idx = idx - 1;
+    }
+  }
+}
+
+
+/* Imposta/azzera il bit (byteIdx, bitInByte) di gTxMsg. */
+void SetBit(int byteIdx, int bitInByte, byte v)
+{
+  if (byteIdx < 0 || byteIdx > 7) return;    /* CAN classico: 8 byte */
+  if (v != 0) gTxMsg.byte(byteIdx) = gTxMsg.byte(byteIdx) |  (1 << bitInByte);
+  else        gTxMsg.byte(byteIdx) = gTxMsg.byte(byteIdx) & ~(1 << bitInByte);
+}
