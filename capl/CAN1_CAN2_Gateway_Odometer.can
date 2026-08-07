@@ -47,8 +47,19 @@
      gOdoMode = 1  -> OVERRIDE:    forza TotalOdometer = gOdoValue (km).
      gOdoMode = 2  -> OFFSET:      TotalOdometer = valore_ricevuto + gOdoOffset
                                    (gOdoOffset e' con segno, in km).
-   I valori si possono cambiare a compile-time (qui sotto) oppure a runtime
-   con i tasti nella Write Window (vedi handler "on key" in fondo).
+
+   INSERIMENTO DEL VALORE DI OVERRIDE DALLA WRITE WINDOW
+   ----------------------------------------------------
+   In CANalyzer un handler "on key" riceve un tasto alla volta, quindi il
+   valore si DIGITA cifra per cifra e poi si conferma:
+     - premi le cifre 0..9: si compongono nel valore di override, che viene
+       via via mostrato nella Write Window;
+     - premi INVIO (oppure il tasto 'a' = applica) per applicare il valore
+       digitato: viene messo in gOdoValue e la modalita' passa a OVERRIDE;
+     - premi 'c' per cancellare cio' che stai digitando (riparte da 0).
+   Esempio: per forzare 123456 km premi  1 2 3 4 5 6  poi INVIO.
+   (Il valore di default gOdoValue qui sotto resta comunque modificabile a
+   compile-time.)
 
    SETUP IN CANALYZER 18
    ---------------------
@@ -81,6 +92,10 @@ variables
   dword gOdoValue  = 100000;   /* km da forzare in modalita' OVERRIDE          */
   long  gOdoOffset = 0;        /* km (con segno) da sommare in modalita' OFFSET */
 
+  /* Valore in fase di digitazione dalla Write Window (cifra per cifra),
+     applicato a gOdoValue quando si preme INVIO / 'a'. */
+  dword gOdoInput  = 0;
+
   /* -------- Anti-eco / anti-loop ------------------------------------------
      Il frame appena ritrasmesso da questo stesso programma genera un evento
      TX che rientra in "on message *": lo scartiamo con this.dir != RX e con
@@ -97,7 +112,8 @@ on start
 {
   write("=====================================================================");
   write(" Gateway CAN1<->CAN2 attivo. Ribalto tutti i frame tra i due canali.");
-  write(" Frame CLUSTER1 (0x259): modifica TotalOdometer -> vedi 'on key'.");
+  write(" Frame CLUSTER1 (0x259): modifica TotalOdometer.");
+  write(" Override: digita le cifre 0..9 e premi INVIO (o 'a') per applicare.");
   LogOdoMode();
   write("=====================================================================");
 }
@@ -196,65 +212,92 @@ on message *
    clicca prima sulla finestra della misurazione e riprova.
 
    Tasti:
-     0 : modalita' PASSTHROUGH (nessuna modifica su 0x259)
-     1 : modalita' OVERRIDE    (forza TotalOdometer = gOdoValue)
-     2 : modalita' OFFSET      (TotalOdometer += gOdoOffset)
-     + : +1000 km al valore forzato (OVERRIDE) o all'offset (OFFSET)
-     - : -1000 km al valore forzato (OVERRIDE) o all'offset (OFFSET)
-     r : azzera valore forzato e offset
+     0..9  : DIGITA il valore di override (mostrato nella Write Window)
+     INVIO : applica il valore digitato -> gOdoValue, modalita' OVERRIDE
+     a     : come INVIO (applica il valore digitato)
+     c     : cancella il valore che stai digitando (riparte da 0)
+     p     : modalita' PASSTHROUGH (nessuna modifica su 0x259)
+     + / - : modalita' OFFSET, +/-1000 km sull'offset
+     r     : azzera valore di override, offset e digitazione
    ============================================================================ */
 
-on key '0'
+/* Le cifre 0..9 compongono il valore di override digitato. */
+on key '0' { OdoInputDigit(0); }
+on key '1' { OdoInputDigit(1); }
+on key '2' { OdoInputDigit(2); }
+on key '3' { OdoInputDigit(3); }
+on key '4' { OdoInputDigit(4); }
+on key '5' { OdoInputDigit(5); }
+on key '6' { OdoInputDigit(6); }
+on key '7' { OdoInputDigit(7); }
+on key '8' { OdoInputDigit(8); }
+on key '9' { OdoInputDigit(9); }
+
+/* Applica il valore digitato: INVIO (0x0D) oppure 'a'. */
+on key 0x0D { OdoInputApply(); }
+on key 'a'  { OdoInputApply(); }
+
+/* Cancella la digitazione in corso. */
+on key 'c'
 {
-  gOdoMode = 0;   /* PASSTHROUGH */
+  gOdoInput = 0;
+  write("[Odometer] digitazione azzerata (override in corso = 0 km)");
+}
+
+/* PASSTHROUGH: nessuna modifica sul frame 0x259. */
+on key 'p'
+{
+  gOdoMode = 0;
   LogOdoMode();
 }
 
-on key '1'
-{
-  gOdoMode = 1;   /* OVERRIDE */
-  LogOdoMode();
-}
-
-on key '2'
-{
-  gOdoMode = 2;   /* OFFSET */
-  LogOdoMode();
-}
-
+/* OFFSET: +/-1000 km, passa automaticamente in modalita' OFFSET. */
 on key '+'
 {
-  if (gOdoMode == 2)
-  {
-    gOdoOffset = gOdoOffset + 1000;
-  }
-  else
-  {
-    if (gOdoValue + 1000 > kOdoMax) gOdoValue = kOdoMax;
-    else                            gOdoValue = gOdoValue + 1000;
-  }
+  gOdoMode = 2;
+  gOdoOffset = gOdoOffset + 1000;
   LogOdoMode();
 }
 
 on key '-'
 {
-  if (gOdoMode == 2)
-  {
-    gOdoOffset = gOdoOffset - 1000;
-  }
-  else
-  {
-    if (gOdoValue < 1000) gOdoValue = 0;
-    else                  gOdoValue = gOdoValue - 1000;
-  }
+  gOdoMode = 2;
+  gOdoOffset = gOdoOffset - 1000;
   LogOdoMode();
 }
 
+/* Reset completo. */
 on key 'r'
 {
   gOdoValue  = 0;
   gOdoOffset = 0;
+  gOdoInput  = 0;
   LogOdoMode();
+}
+
+
+/* Aggiunge una cifra al valore di override in fase di digitazione. */
+void OdoInputDigit(dword d)
+{
+  gOdoInput = gOdoInput * 10 + d;
+  if (gOdoInput > kOdoMax)
+  {
+    gOdoInput = kOdoMax;   /* clamp a 20 bit (max 1048575 km) */
+  }
+  write("[Odometer] override digitato = %d km  (INVIO o 'a' per applicare, 'c' per cancellare)", gOdoInput);
+}
+
+/* Applica il valore digitato al segnale di override e attiva la modalita'. */
+void OdoInputApply()
+{
+  gOdoValue = gOdoInput;
+  if (gOdoValue > kOdoMax)
+  {
+    gOdoValue = kOdoMax;
+  }
+  gOdoMode  = 1;    /* OVERRIDE */
+  gOdoInput = 0;    /* pronto per una nuova digitazione */
+  write("[Odometer] OVERRIDE applicato: TotalOdometer forzato = %d km", gOdoValue);
 }
 
 
