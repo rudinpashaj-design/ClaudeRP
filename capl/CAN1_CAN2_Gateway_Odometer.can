@@ -191,16 +191,34 @@ on message *
 /* ============================================================================
    CONTROLLO A RUNTIME DEL VALORE TotalOdometer (Write Window)
    ============================================================================
-   Tasti (con il focus sulla finestra Write / Measurement):
-     o : cicla la modalita' 0 -> 1 -> 2 -> 0 (passthrough / override / offset)
+   NOTA: i tasti "on key" funzionano solo quando la finestra della
+   misurazione (o la Write Window) ha il FOCUS. Se un tasto non risponde,
+   clicca prima sulla finestra della misurazione e riprova.
+
+   Tasti:
+     0 : modalita' PASSTHROUGH (nessuna modifica su 0x259)
+     1 : modalita' OVERRIDE    (forza TotalOdometer = gOdoValue)
+     2 : modalita' OFFSET      (TotalOdometer += gOdoOffset)
      + : +1000 km al valore forzato (OVERRIDE) o all'offset (OFFSET)
      - : -1000 km al valore forzato (OVERRIDE) o all'offset (OFFSET)
-     0 : azzera valore forzato / offset
+     r : azzera valore forzato e offset
    ============================================================================ */
 
-on key 'o'
+on key '0'
 {
-  gOdoMode = (gOdoMode + 1) % 3;
+  gOdoMode = 0;   /* PASSTHROUGH */
+  LogOdoMode();
+}
+
+on key '1'
+{
+  gOdoMode = 1;   /* OVERRIDE */
+  LogOdoMode();
+}
+
+on key '2'
+{
+  gOdoMode = 2;   /* OFFSET */
   LogOdoMode();
 }
 
@@ -232,7 +250,7 @@ on key '-'
   LogOdoMode();
 }
 
-on key '0'
+on key 'r'
 {
   gOdoValue  = 0;
   gOdoOffset = 0;
