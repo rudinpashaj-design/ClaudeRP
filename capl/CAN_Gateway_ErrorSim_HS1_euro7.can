@@ -136,6 +136,12 @@ variables
   byte  gCntByteIdx[96];
   byte  gCntBitStart[96];
   byte  gCntBitLen[96];    /* 0 = nessun counter su questo frame */
+  /* DTC attesi (dal Diag_Matrix euro7) quando si inietta l'errore sul frame:
+     stringa "DFC_xxx (Ucode-FT)". Vuoto = frame non monitorato in matrice per
+     quel tipo. Popolati in InitFrameTable() con SetFrameDtc(). */
+  char  gDtcTout[96][64];  /* timeout / missing frame */
+  char  gDtcCks[96][64];   /* checksum errato          */
+  char  gDtcCnt[96][64];   /* counter errato           */
   int   gFrameCount;
 
   /* ---------------- STATO SIMULAZIONE: TIMEOUT ---------------------------- */
@@ -321,6 +327,79 @@ void InitFrameTable()
      euro7 e aggiungere qui le SetChkTarget(id, K) corrispondenti, come fatto
      in euro6 per 0x349/0x34D/0x38D/0x3C9/0x3CD/0x495/0x50D.
      ============================================================ */
+
+  /* ============================================================
+     DTC ATTESI dal Diag_Matrix euro7
+     (01552_25_04710_B2.2_K0_euro7_diag_Matrix_V1.3, foglio "Matrix").
+     Per ogni frame monitorato dal CMM: quale DTC deve accendersi quando si
+     inietta l'errore corrispondente. Stampati nella Write Window
+     all'attivazione dell'errore. SetFrameDtc(id, tipo, "DFC (Ucode-FT)"),
+     tipo: 0 = timeout/missing, 1 = checksum, 2 = counter.
+     22 frame HS1 mappati (i frame senza riga qui non compaiono in matrice
+     come monitorati per quel tipo di errore).
+     ============================================================ */
+  SetFrameDtc(0x305, 0, "DFC_ComVOL305Tout (U1105-87)");
+  SetFrameDtc(0x305, 1, "DFC_ComVOL305Chks (U1305-83)");
+  SetFrameDtc(0x305, 2, "DFC_ComVOL305Cntr (U1305-82)");
+  SetFrameDtc(0x30D, 0, "DFC_ComFRE30DTout (U0121-87)");
+  SetFrameDtc(0x349, 0, "DFC_ComV2BVA349Tout (U0103-87)");
+  SetFrameDtc(0x349, 1, "DFC_ComV2BVA349Chks (U1309-83)");
+  SetFrameDtc(0x349, 2, "DFC_ComV2BVA349Cntr (U1309-82)");
+  SetFrameDtc(0x34D, 0, "DFC_ComCDSV234DTout (U0121-87)");
+  SetFrameDtc(0x34D, 1, "DFC_ComCDSV234DChks (U1313-83)");
+  SetFrameDtc(0x34D, 2, "DFC_ComCDSV234DCntr (U1313-82)");
+  SetFrameDtc(0x38D, 0, "DFC_ComABR38DTout (U0121-87)");
+  SetFrameDtc(0x38D, 1, "DFC_ComABR38DChks (U1313-83)");
+  SetFrameDtc(0x38D, 2, "DFC_ComABR38DCntr (U1313-82)");
+  SetFrameDtc(0x3AD, 0, "DFC_ComSIEASYMOVE3ADTout (U0121-87)");
+  SetFrameDtc(0x3AD, 1, "DFC_ComSIEASYMOVE3ADChks (U1313-83)");
+  SetFrameDtc(0x3AD, 2, "DFC_ComSIEASYMOVE3ADCntr (U1313-82)");
+  SetFrameDtc(0x3C9, 0, "DFC_ComV2BV3C9Tout (U0103-87)");
+  SetFrameDtc(0x3C9, 1, "DFC_ComV2BV3C9Chks (U1309-83)");
+  SetFrameDtc(0x3C9, 2, "DFC_ComV2BV3C9Cntr (U1309-82)");
+  SetFrameDtc(0x3CD, 0, "DFC_ComFRE3CDTout (U0121-87)");
+  SetFrameDtc(0x3CD, 1, "DFC_ComFRE3CDChks (U1313-83)");
+  SetFrameDtc(0x3CD, 2, "DFC_ComFRE3CDCntr (U1313-82)");
+  SetFrameDtc(0x412, 0, "DFC_ComBSI412Tout (U0140-87)");
+  SetFrameDtc(0x432, 0, "DFC_ComBSI432Tout (U0140-87)");
+  SetFrameDtc(0x432, 2, "DFC_ComBSI432Cntr (U1318-82)");
+  SetFrameDtc(0x44D, 0, "DFC_ComABR44DTout (U0121-87)");
+  SetFrameDtc(0x46E, 0, "DFC_ComDATBSI46ETout (U0140-87)");
+  SetFrameDtc(0x489, 0, "DFC_ComV2BV489Tout (U0103-87)");
+  SetFrameDtc(0x492, 0, "DFC_ComBDEVINVDSBSI492Tout (U0140-87)");
+  SetFrameDtc(0x495, 0, "DFC_ComDIRA495Tout (U0131-87)");
+  SetFrameDtc(0x495, 1, "DFC_ComDIRA495Chks (U1321-83)");
+  SetFrameDtc(0x495, 2, "DFC_ComDIRA495Cntr (U1321-82)");
+  SetFrameDtc(0x4E9, 0, "DFC_ComBV4E9Tout (U0103-87)");
+  SetFrameDtc(0x4E9, 1, "DFC_ComBV4E9Chks (U1309-83)");
+  SetFrameDtc(0x4E9, 2, "DFC_ComBV4E9Cntr (U1309-82)");
+  SetFrameDtc(0x50D, 0, "DFC_ComABR50DTout (U0121-87)");
+  SetFrameDtc(0x50D, 1, "DFC_ComABR50DChks (U1313-83)");
+  SetFrameDtc(0x50D, 2, "DFC_ComABR50DCntr (U1313-82)");
+  SetFrameDtc(0x552, 0, "DFC_ComV2BSI552Tout (U0140-87)");
+  SetFrameDtc(0x552, 2, "DFC_ComV2BSI552Cntr (U0322-82)");
+  SetFrameDtc(0x56E, 0, "DFC_ComBSI56ETout (U0140-87)");
+  SetFrameDtc(0x56E, 1, "DFC_ComBSI56EChks (U1318-83)");
+  SetFrameDtc(0x56E, 2, "DFC_ComBSI56ECntr (U1318-82)");
+  SetFrameDtc(0x572, 0, "DFC_ComBSI572Tout (U0140-87)");
+  SetFrameDtc(0x5B2, 0, "DFC_ComCONTEXTE15B2Tout (U0140-87)");
+  SetFrameDtc(0x612, 0, "DFC_ComBSI612Tout (U0140-87)");
+}
+
+/* Associa a un frame (per ID) il DTC atteso dal Diag_Matrix per un tipo di
+   errore. tipo: 0 = timeout/missing, 1 = checksum, 2 = counter. Da chiamare
+   dopo il relativo AddFrame(). */
+void SetFrameDtc(dword id, int tipo, char dtc[])
+{
+  int i;
+  i = ResolveFrameIndexById(id);
+  if (i < 0)
+  {
+    return;
+  }
+  if      (tipo == 0) strncpy(gDtcTout[i], dtc, elcount(gDtcTout[i]));
+  else if (tipo == 1) strncpy(gDtcCks[i],  dtc, elcount(gDtcCks[i]));
+  else                strncpy(gDtcCnt[i],  dtc, elcount(gDtcCnt[i]));
 }
 
 void AddFrame(char name[], dword id, byte originCan, byte chkByte, byte chkBit, byte chkLen,
@@ -619,6 +698,7 @@ on sysvar_update sysvar::GatewaySim::ApplyTrigger
         setTimer(gTimeoutTimer, @sysvar::GatewaySim::TimeoutDuration_ms);
       }
       write("[Gateway] Timeout ATTIVO su %s (ID 0x%X)", gFrameName[fIdx], frameId);
+      if (gDtcTout[fIdx][0] != 0) write("           -> DTC atteso: %s", gDtcTout[fIdx]);
       break;
 
     case 2: /* Checksum error */
@@ -631,6 +711,7 @@ on sysvar_update sysvar::GatewaySim::ApplyTrigger
       gChkErrFrameIdx = fIdx;
       gChkErrActive   = 1;
       write("[Gateway] Errore CHECKSUM attivo su %s (ID 0x%X)", gFrameName[fIdx], frameId);
+      if (gDtcCks[fIdx][0] != 0) write("           -> DTC atteso: %s", gDtcCks[fIdx]);
       break;
 
     case 3: /* DLC error */
@@ -660,6 +741,7 @@ on sysvar_update sysvar::GatewaySim::ApplyTrigger
       {
         write("[Gateway] Errore COUNTER (jump) attivo su %s (ID 0x%X)", gFrameName[fIdx], frameId);
       }
+      if (gDtcCnt[fIdx][0] != 0) write("           -> DTC atteso: %s", gDtcCnt[fIdx]);
       break;
 
     default: /* 0 = Nessuno */

@@ -110,6 +110,12 @@ variables
   byte  gCntByteIdx[48];
   byte  gCntBitStart[48];
   byte  gCntBitLen[48];    /* 0 = nessun counter su questo frame */
+  /* DTC attesi (dal Diag_Matrix euro7) quando si inietta l'errore sul frame:
+     stringa "DFC_xxx (Ucode-FT)". Vuoto = frame non monitorato in matrice per
+     quel tipo. Popolati in InitFrameTable() con SetFrameDtc(). */
+  char  gDtcTout[48][64];  /* timeout / missing frame */
+  char  gDtcCks[48][64];   /* checksum errato          */
+  char  gDtcCnt[48][64];   /* counter errato           */
   int   gFrameCount;
 
   /* ---------------- STATO SIMULAZIONE: TIMEOUT ---------------------------- */
@@ -230,6 +236,55 @@ void InitFrameTable()
      (UCF_2CD/0x2CD non aveva campioni; CLIM_50E/0x50E ha un checksum di 2
      bit con algoritmo diverso, mai validato nemmeno in euro6.)
      ============================================================ */
+
+  /* ============================================================
+     DTC ATTESI dal Diag_Matrix euro7
+     (01552_25_04710_B2.2_K0_euro7_diag_Matrix_V1.3, foglio "Matrix").
+     Per ogni frame monitorato dal CMM: quale DTC deve accendersi quando si
+     inietta l'errore corrispondente. Stampati nella Write Window
+     all'attivazione dell'errore. SetFrameDtc(id, tipo, "DFC (Ucode-FT)"),
+     tipo: 0 = timeout/missing, 1 = checksum, 2 = counter.
+     14 frame HS2 mappati.
+     ============================================================ */
+  SetFrameDtc(0x1CD, 0, "DFC_ComESC1CDTout (U0129-87)");
+  SetFrameDtc(0x2B6, 0, "DFC_ComMDDETAT2B6Tout (U1162-87)");
+  SetFrameDtc(0x2B6, 1, "DFC_ComMDDETAT2B6Chks (U1362-83)");
+  SetFrameDtc(0x2B6, 2, "DFC_ComMDDETAT2B6Cntr (U1362-82)");
+  SetFrameDtc(0x2CD, 0, "DFC_ComUCF2CDTout (U0129-87)");
+  SetFrameDtc(0x2CD, 1, "DFC_ComUCF2CDChks (U1313-83)");
+  SetFrameDtc(0x2CD, 2, "DFC_ComUCF2CDCntr (U1313-82)");
+  SetFrameDtc(0x329, 0, "DFC_ComSTTBV329Tout (U0101-87)");
+  SetFrameDtc(0x329, 1, "DFC_ComSTTBV329Chks (U1309-83)");
+  SetFrameDtc(0x329, 2, "DFC_ComSTTBV329Cntr (U1309-82)");
+  SetFrameDtc(0x32D, 0, "DFC_ComUCFMDD32DTout (U0129-87)");
+  SetFrameDtc(0x32D, 1, "DFC_ComUCFMDD32DChks (U1313-83)");
+  SetFrameDtc(0x42D, 0, "DFC_ComESC42DTout (U0129-87)");
+  SetFrameDtc(0x42E, 0, "DFC_ComBSI42ETout (U0141-87)");
+  SetFrameDtc(0x48E, 0, "DFC_ComBSI48ETout (U0140-87)");
+  SetFrameDtc(0x4B2, 0, "DFC_ComVISBSI4B2Tout (U0141-87)");
+  SetFrameDtc(0x4D2, 0, "DFC_ComWMIBSI4D2Tout (U0141-87)");
+  SetFrameDtc(0x4F2, 0, "DFC_ComBSI4F2Tout (U0141-87)");
+  SetFrameDtc(0x50E, 0, "DFC_ComCLIM50ETout (U0141-87)");
+  SetFrameDtc(0x50E, 1, "DFC_ComCLIM50EChks (U0322-83)");
+  SetFrameDtc(0x50E, 2, "DFC_ComCLIM50ECntr (U0322-82)");
+  SetFrameDtc(0x532, 0, "DFC_ComDATBSI532Tout (U0141-87)");
+  SetFrameDtc(0x592, 0, "DFC_ComBSI592Tout (U0141-87)");
+}
+
+/* Associa a un frame (per ID) il DTC atteso dal Diag_Matrix per un tipo di
+   errore. tipo: 0 = timeout/missing, 1 = checksum, 2 = counter. Da chiamare
+   dopo il relativo AddFrame(). */
+void SetFrameDtc(dword id, int tipo, char dtc[])
+{
+  int i;
+  i = ResolveFrameIndexById(id);
+  if (i < 0)
+  {
+    return;
+  }
+  if      (tipo == 0) strncpy(gDtcTout[i], dtc, elcount(gDtcTout[i]));
+  else if (tipo == 1) strncpy(gDtcCks[i],  dtc, elcount(gDtcCks[i]));
+  else                strncpy(gDtcCnt[i],  dtc, elcount(gDtcCnt[i]));
 }
 
 void AddFrame(char name[], dword id, byte originCan, byte chkByte, byte chkBit, byte chkLen,
@@ -534,6 +589,7 @@ on sysvar_update sysvar::GatewaySimHS2::ApplyTrigger
         setTimer(gTimeoutTimer, @sysvar::GatewaySimHS2::TimeoutDuration_ms);
       }
       write("[GatewayHS2] Timeout ATTIVO su %s (ID 0x%X)", gFrameName[fIdx], frameId);
+      if (gDtcTout[fIdx][0] != 0) write("             -> DTC atteso: %s", gDtcTout[fIdx]);
       break;
 
     case 2: /* Checksum error */
@@ -546,6 +602,7 @@ on sysvar_update sysvar::GatewaySimHS2::ApplyTrigger
       gChkErrFrameIdx = fIdx;
       gChkErrActive   = 1;
       write("[GatewayHS2] Errore CHECKSUM attivo su %s (ID 0x%X)", gFrameName[fIdx], frameId);
+      if (gDtcCks[fIdx][0] != 0) write("             -> DTC atteso: %s", gDtcCks[fIdx]);
       break;
 
     case 3: /* DLC error */
@@ -575,6 +632,7 @@ on sysvar_update sysvar::GatewaySimHS2::ApplyTrigger
       {
         write("[GatewayHS2] Errore COUNTER (jump) attivo su %s (ID 0x%X)", gFrameName[fIdx], frameId);
       }
+      if (gDtcCnt[fIdx][0] != 0) write("             -> DTC atteso: %s", gDtcCnt[fIdx]);
       break;
 
     default: /* 0 = Nessuno */
