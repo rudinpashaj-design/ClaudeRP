@@ -1,0 +1,697 @@
+/*@@author(-)*/
+/*@@version(1.0)*/
+
+/* ============================================================================
+   CAN GATEWAY  CAN1 <-> CAN2  +  SIMULATORE ERRORI  (Vector CANalyzer 19)
+   ============================================================================
+
+   FUNZIONI
+   --------
+   1) Gateway trasparente bidirezionale: ogni frame ricevuto su CAN1 viene
+      ritrasmesso su CAN2 e ogni frame ricevuto su CAN2 viene ritrasmesso su
+      CAN1 (copia byte-per-byte, non serve avere i segnali nel DBC per
+      inoltrare un frame: funziona per QUALSIASI ID).
+
+   2) Simulazione errori, attivabile A RUNTIME (a misurazione avviata) tramite
+      System Variables collegate ad un Panel:
+        - TIMEOUT           : il frame indicato smette di essere inoltrato
+                               (per una durata configurabile oppure a tempo
+                               indeterminato finché non si preme "Clear")
+        - DLC ERROR         : il frame indicato viene inoltrato con un DLC
+                               forzato/errato
+        - CHECKSUM ERROR    : il byte del segnale di checksum indicato viene
+                               invalidato (incrementato di 1) prima di essere
+                               inoltrato
+        - COUNTER ERROR     : il segnale message-counter indicato viene
+                               "congelato" (freeze, stesso valore ripetuto) o
+                               fatto "saltare" (jump, +2) per rompere la
+                               sequenza attesa dal ricevitore
+
+   CONFIGURAZIONE FRAME / SEGNALI
+   -------------------------------
+   CAPL non può leggere in automatico dal DBC caricato la posizione bit di un
+   segnale generico a runtime: la tabella frame in InitFrameTable() deve
+   quindi essere precompilata. La tabella qui sotto è già stata generata dal
+   DBC euro7 "CAN_HS1_AEE2010_R3_Test_CAN_MESSG_euro7_V1.6.dbc" (71 frame),
+   con riferimento diagnostico al Diag_Matrix
+   "01552_25_04710_B2.2_K0_euro7_diag_Matrix_V1.3". Ogni riga
+   include gia' la posizione (byte/bit) del segnale di checksum e di quello
+   di counter del frame, se presenti (dato che ogni frame ne ha al massimo
+   uno di ciascuno in questo DBC non serve un "nome segnale" separato: basta
+   l'ID del frame). Byte index / bit start / bit length calcolati per
+   encoding empirico direttamente dal DBC (vedi commenti dentro
+   InitFrameTable() per le esclusioni e la nota su COMPTEUR_RAZ_GCT). Se il
+   DBC cambia, la tabella va rigenerata di conseguenza:
+       AddFrame(nome, ID, chkByte, chkBit, chkLen, cntByte, cntBit, cntLen);
+   (chkLen/cntLen = 0 se il frame non ha quel segnale)
+
+   CANALI CAN1 / CAN2
+   -------------------
+   Il gateway usa un unico handler "on message *" e smista i frame in base al
+   canale fisico (this.can == 1 oppure 2), NON in base al nome della rete: il
+   nodo CAPL nel Simulation Setup deve essere collegato sia al canale 1 sia
+   al canale 2 nella Channel Mapping della configurazione. Se nel proprio
+   progetto CAN1/CAN2 corrispondono a numeri di canale diversi da 1 e 2,
+   aggiornare i valori confrontati con "this.can" nell'handler.
+
+   INPUT UTENTE: SYSTEM VARIABLES DA CREARE
+   ------------------------------------------
+   Il compilatore di questa installazione CANalyzer accetta l'accesso diretto
+   "@sysvar::Namespace::Var" SOLO per system variable numeriche (Int/Float):
+   per le stringhe non esiste una sintassi diretta funzionante in questo
+   ambiente, quindi tutte le system variable qui sotto sono volutamente
+   Integer (nessuna String).
+
+   Creare in CANalyzer (finestra "System Variables" -> tasto destro ->
+   New Namespace "GatewaySim") le seguenti variabili, tutte di tipo Integer:
+
+     Nome                  Descrizione
+     --------------------  ------------------------------------------------
+     FrameId               ID del frame (decimale) su cui agire, es. 773
+                            per 0x305. Suggerimento: per selezionarlo per
+                            nome, creare una Value Table (System Variables ->
+                            tasto destro sulla variabile -> Value Table) che
+                            mappa ogni ID ai nomi frame, cosi' il Panel mostra
+                            un combo-box con i nomi ma salva l'ID.
+     TimeoutDuration_ms    Durata timeout in ms (0 = indeterminato, fino a
+                            Clear)
+     DlcErrorValue         DLC errato da forzare (0..8)
+     ErrorType             0 = Nessuno
+                            1 = Timeout
+                            2 = Checksum error
+                            3 = DLC error
+                            4 = Counter error (freeze)
+                            5 = Counter error (jump)
+     ApplyTrigger          Incrementare da Panel per applicare la simulazione
+     ClearTrigger          Incrementare da Panel per disattivare tutte le
+                            simulazioni attive
+
+   Lo stato/esito di ogni comando viene scritto solo nella Write Window
+   (funzione write()), non serve una StatusText.
+
+   PANEL (Panel Designer)
+   ------------------------
+   Creare un Panel con:
+     - Combo box / Edit box (numerico) -> FrameId (con Value Table per i nomi)
+     - Edit box (numerico) -> TimeoutDuration_ms
+     - Edit box (numerico) -> DlcErrorValue
+     - Combo box -> ErrorType (voci: None=0, Timeout=1, Checksum=2, DLC=3,
+       CounterFreeze=4, CounterJump=5)
+     - Pulsante  -> incrementa ApplyTrigger
+     - Pulsante  -> incrementa ClearTrigger
+   ============================================================================ */
+
+variables
+{
+  /* ---------------- TABELLA FRAME (da configurare) ------------------------
+     Ogni riga = un frame, con l'eventuale posizione del suo segnale di
+     checksum e del suo message-counter gia' inclusa (bitLen = 0 significa
+     "questo frame non ha quel segnale"). Un frame ha al massimo un segnale
+     di checksum e uno di counter, quindi non serve piu' un nome di segnale
+     separato: basta l'ID del frame. */
+  const int kMaxFrames = 96;
+  char  gFrameName[96][51];
+  dword gFrameId[96];
+  /* 1 = origine canale fisico 1, 2 = origine canale fisico 2. ATTENZIONE:
+     in questa configurazione CANalyzer il canale 2 e' quello dove CMM
+     trasmette nativamente (CMM_xxx) e il canale 1 e' quello dove tutti gli
+     altri nodi (BSI, UC_FREIN, BV, ...) trasmettono nativamente - verificato
+     dalla traccia bus reale, quindi INVERTITO rispetto alla convenzione
+     "CAN1=CMM/CAN2=altri" descritta a parole nell'header. Se si ricollega il
+     nodo CAPL a canali diversi, questi valori vanno riverificati dalla
+     traccia (Trace window) prima di fidarsi del filtro anti-eco sotto. */
+  byte  gFrameOriginCan[96];
+  byte  gChkByteIdx[96];
+  byte  gChkBitStart[96];
+  byte  gChkBitLen[96];    /* 0 = nessun checksum su questo frame */
+  /* Valore target del checksum a somma (vedi ComputeChecksumNibble sotto):
+     255 = algoritmo non validato per questo frame (checksum lasciato
+     "invalidato" come effetto collaterale, comportamento precedente),
+     0..15 = costante determinata per reverse engineering dalla traccia
+     reale (somma di tutti i nibble del frame deve fare questa costante
+     mod 16). Permette di ricalcolare un checksum VALIDO dopo aver
+     alterato il counter, cosi' la simulazione errore counter non genera
+     anche un falso errore checksum. */
+  byte  gChkTarget[96];
+  byte  gCntByteIdx[96];
+  byte  gCntBitStart[96];
+  byte  gCntBitLen[96];    /* 0 = nessun counter su questo frame */
+  int   gFrameCount;
+
+  /* ---------------- STATO SIMULAZIONE: TIMEOUT ---------------------------- */
+  dword   gTimeoutActive  = 0;
+  long    gTimeoutFrameId = -1;
+  msTimer gTimeoutTimer;
+
+  /* ---------------- STATO SIMULAZIONE: DLC ERROR --------------------------- */
+  dword gDlcErrActive  = 0;
+  long  gDlcErrFrameId = -1;
+  byte  gDlcErrValue   = 0;
+
+  /* ---------------- STATO SIMULAZIONE: CHECKSUM ERROR ----------------------- */
+  dword gChkErrActive   = 0;
+  long  gChkErrFrameId  = -1;
+  int   gChkErrFrameIdx = -1;
+
+  /* ---------------- STATO SIMULAZIONE: COUNTER ERROR ------------------------ */
+  dword gCntErrActive   = 0;
+  long  gCntErrFrameId  = -1;
+  int   gCntErrFrameIdx = -1;
+  dword gCntErrMode     = 0;  /* 0 = freeze, 1 = jump */
+  dword gCntFrozenValue = 0;
+  dword gCntFrozenValid = 0;
+
+  /* ---------------- MESSAGGIO GENERICO RIUSABILE PER IL FORWARDING ---------- */
+  /* In CAPL un oggetto "message" non puo' essere passato come parametro di
+     funzione ne' dichiarato come variabile locale: va dichiarato una sola
+     volta come variabile globale (l'ID iniziale 0x000 e' solo un placeholder,
+     viene sovrascritto ad ogni forwarding con gTxMsg.id = ...). */
+  message 0x000 gTxMsg;
+
+  /* Guard di rientranza: se "on message *" venisse invocato di nuovo
+     (sincronamente) per il frame che stiamo appena ritrasmettendo con
+     output(), questo flag lo blocca prima che diventi un loop di
+     inoltro CAN1->CAN2->CAN1->... Non sostituisce una configurazione
+     corretta dei canali (vedi commenti nell'header), ma e' una
+     protezione aggiuntiva indipendente da "this.dir". */
+  dword gInForward = 0;
+}
+
+
+/* ============================================================================
+   INIZIALIZZAZIONE
+   ============================================================================ */
+
+on preStart
+{
+  gFrameCount = 0;
+  InitFrameTable();
+  write("[Gateway] Inizializzato. Frame configurati: %d", gFrameCount);
+}
+
+/* DISABILITATO: l'invio forzato del frame di wake-up (REVEIL_PRINCIPAL=2
+   su 0x432/BSI_432) all'istante zero della misura e' stato rimosso.
+   Causava un sovraccarico critico della coda (decine di migliaia di
+   eventi persi nei primi secondi, "Queue: DATA LOST"), perche' a t=0
+   nessun nodo e' ancora sveglio su nessuno dei due bus e il controller
+   CAN ritrasmette in hardware il frame non confermato in modo
+   incontrollato. Il traffico reale del veicolo, nelle prove precedenti,
+   compariva comunque da solo entro pochi secondi senza bisogno di
+   questo invio forzato. Se serve reintrodurlo, va fatto con cautela
+   (es. solo dopo aver gia' osservato traffico reale sul bus, non
+   all'avvio assoluto) e proteggendo l'output() con lo stesso guard
+   gInForward usato nell'handler "on message *" qui sotto. */
+
+void InitFrameTable()
+{
+  /* ============================================================
+     Tabella generata AUTOMATICAMENTE dal DBC euro7:
+       CAN_HS1_AEE2010_R3_Test_CAN_MESSG_euro7_V1.6.dbc
+     (riferimento diagnostico: 01552_25_04710_B2.2_K0_euro7_diag_Matrix_V1.3)
+     71 frame totali (36 trasmessi da CMM -> originCan 2, 35 da altri nodi
+     -> originCan 1).
+     Parametri: AddFrame(nome, ID, originCan, chkByte, chkBit, chkLen, cntByte, cntBit, cntLen)
+
+     A DIFFERENZA della versione euro6 (posizioni ricavate per encoding
+     empirico + counter incerti), qui checksum e counter sono presi dai
+     segnali di protezione ESPLICITI del DBC euro7:
+        counter  = CPT_PROCESS_4B_*    (rolling counter a 4 bit)
+        checksum = CHKSUM_*_4B / CHKSUM_TRME_DYN_* / CHKSUM_VOL (4 bit)
+     La conversione bit DBC->(byte,bit) e' stata verificata: riproduce
+     ESATTAMENTE la vecchia tabella euro6 tarata a mano per tutti i frame
+     comuni (VOL_305, V2_BVA_349, CDS_V2_34D, ABR_38D, BSI_432, ...).
+
+     originCan: transmitter==CMM -> 2, tutti gli altri nodi -> 1 (mappatura
+     fisica invertita rispetto alla convenzione "CAN1=CMM", confermata su
+     traccia bus reale; vedi commento nel blocco variabili). Se si ricollega
+     il nodo CAPL a canali diversi, riverificare dalla Trace window.
+
+     NOVITA' euro7 - frame SENZA protezione a 4 bit (inoltrati dal gateway
+     ma senza checksum/counter manipolabili): SecOC / FSECE7_PSK
+     (0x299,0x33A-0x33E), OBM / cyber-security (0x566,0x585,0x586,0x59F),
+     OBFCM (0x48F), DAT_CMM / DYN_CMM vari, contesti diagnostici.
+     NOTA: in euro7 V2_BSI_552 NON ha piu' un rolling counter a 4 bit
+     (CPT_TEMPOREL / COMPTEUR_RAZ_GCT non sono CPT_PROCESS_4B): cntLen=0.
+     ============================================================ */
+
+  AddFrame("IMMO_CMM_BSI_072", 0x72, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("ELECTRON_BSI_092", 0x92, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("IMMO_BSI_CMM_0A8", 0xA8, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("IMMO_UCC_CMM_0E0", 0xE0, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("IMMO_CMM_UCC_0E8", 0xE8, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("VERS_CMM_108", 0x108, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("CMM_1E8", 0x1E8, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("CMM_208", 0x208, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("CMM_SECOC_TEST_299", 0x299, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("VOL_305", 0x305, 1, 4, 4, 4, 4, 0, 4);
+  AddFrame("FRE_30D", 0x30D, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("BSI_FSECE7_PSK_GETOPID_33A", 0x33A, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("CMM_FSECE7_PSK_STATUS_33B", 0x33B, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("BSI_FSECE7_PSK_MSB_33C", 0x33C, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("BSI_FSECE7_PSK_LSB_33D", 0x33D, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("BSI_FSECE7_PSK_E2E_33E", 0x33E, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("CMM_348", 0x348, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("V2_BVA_349", 0x349, 1, 6, 4, 4, 6, 0, 4);
+  AddFrame("CDS_V2_34D", 0x34D, 1, 4, 0, 4, 5, 0, 4);
+  AddFrame("CMM_388", 0x388, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("ABR_38D", 0x38D, 1, 5, 0, 4, 5, 4, 4);
+  AddFrame("SI_EASY_MOVE_3AD", 0x3AD, 1, 7, 0, 4, 7, 4, 4);
+  AddFrame("V2_BV_3C9", 0x3C9, 1, 3, 4, 4, 3, 0, 4);
+  AddFrame("FRE_3CD", 0x3CD, 1, 7, 4, 4, 7, 0, 4);
+  AddFrame("BSI_412", 0x412, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("BSI_432", 0x432, 1, 0, 0, 0, 1, 0, 4);
+  AddFrame("ABR_44D", 0x44D, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("CMM_468", 0x468, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("DAT_BSI_46E", 0x46E, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("V2_BV_489", 0x489, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("OBFCM_CMM_48F", 0x48F, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("BDE_VIN_VDS_BSI_492", 0x492, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("DIRA_495", 0x495, 1, 4, 4, 4, 4, 0, 4);
+  AddFrame("CRASH_4C8", 0x4C8, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("BV_4E9", 0x4E9, 1, 1, 0, 4, 1, 4, 4);
+  AddFrame("CMM_4F8", 0x4F8, 2, 2, 4, 4, 2, 0, 4);
+  AddFrame("ABR_50D", 0x50D, 1, 7, 0, 4, 7, 4, 4);
+  AddFrame("DAT_CMM_525", 0x525, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("DAT_CMM_52C", 0x52C, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("V2_BSI_552", 0x552, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("NEW_JDD_55F", 0x55F, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("OBM_CYBER_SECURITY_566", 0x566, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("BSI_56E", 0x56E, 1, 4, 0, 4, 4, 4, 4);
+  AddFrame("BSI_572", 0x572, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("OBM_585", 0x585, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("OBM_586", 0x586, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("CMM_588", 0x588, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("CMM_598", 0x598, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("OBM_59F", 0x59F, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("DAT_BSRF_5A0", 0x5A0, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("CONTEXTE_1_5B2", 0x5B2, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("DAT_CMM_5C9", 0x5C9, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("CMM_5F8", 0x5F8, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("DYN_CMM_600", 0x600, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("DYN_CMM_601", 0x601, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("DYN_CMM_603", 0x603, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("EOBD_CMM_608", 0x608, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("BSI_612", 0x612, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("REP_DIAG_ON_CAN_688", 0x688, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("REQ_DIAG_ON_CAN_6A8", 0x6A8, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("NEW_JDD_CMM_768", 0x768, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("SUPV_V2_CMM_788", 0x788, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("IS_MAP_CMM_7A8", 0x7A8, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("OUTIL_PRTCLE_CCP_7CC", 0x7CC, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("OUTIL_PRTCLE_CCP_7CD", 0x7CD, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("OUTIL_PRTCLE_CCP_7CE", 0x7CE, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("OUTIL_PRTCLE_CCP_7CF", 0x7CF, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("REQ_EOBD_ON_CAN_V2_7DF", 0x7DF, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("REQ_EOBD_ON_CAN_7E0", 0x7E0, 1, 0, 0, 0, 0, 0, 0);
+  AddFrame("REP_EOBD_ON_CAN_7E8", 0x7E8, 2, 0, 0, 0, 0, 0, 0);
+  AddFrame("UDS_ON_CAN_7FF", 0x7FF, 2, 0, 0, 0, 0, 0, 0);
+
+  /* ============================================================
+     TARGET CHECKSUM (SetChkTarget): NON impostati per euro7.
+     I valori euro6 erano stati ricavati per reverse engineering da tracce
+     bus reali euro6 (Diagnositc_Trace_HS1__T001.asc) e NON sono validi per
+     euro7 (layout dei frame cambiato). Finche' non si dispone di una
+     traccia bus reale euro7, tutti i target restano 255 = "non validato":
+       - la simulazione errore CHECKSUM si limita a INVALIDARE il checksum
+         (comportamento sicuro, +1 sul byte del checksum);
+       - la simulazione errore COUNTER NON ricalcola un checksum valido,
+         quindi altererebbe anche il checksum come effetto collaterale.
+     Per riattivare il ricalcolo del checksum valido dopo aver alterato il
+     counter, derivare le costanti "somma nibble mod 16 = K" da una traccia
+     euro7 e aggiungere qui le SetChkTarget(id, K) corrispondenti, come fatto
+     in euro6 per 0x349/0x34D/0x38D/0x3C9/0x3CD/0x495/0x50D.
+     ============================================================ */
+}
+
+void AddFrame(char name[], dword id, byte originCan, byte chkByte, byte chkBit, byte chkLen,
+              byte cntByte, byte cntBit, byte cntLen)
+{
+  if (gFrameCount >= kMaxFrames)
+  {
+    write("[Gateway] ATTENZIONE: tabella frame piena, aumentare kMaxFrames");
+    return;
+  }
+  strncpy(gFrameName[gFrameCount], name, elcount(gFrameName[gFrameCount]));
+  gFrameId[gFrameCount]         = id;
+  gFrameOriginCan[gFrameCount]  = originCan;
+  gChkByteIdx[gFrameCount]      = chkByte;
+  gChkBitStart[gFrameCount]     = chkBit;
+  gChkBitLen[gFrameCount]       = chkLen;
+  gChkTarget[gFrameCount]       = 255; /* default: algoritmo non validato, vedi SetChkTarget() */
+  gCntByteIdx[gFrameCount]      = cntByte;
+  gCntBitStart[gFrameCount]     = cntBit;
+  gCntBitLen[gFrameCount]       = cntLen;
+  gFrameCount = gFrameCount + 1;
+}
+
+/* Imposta la costante target del checksum a somma per un frame gia'
+   aggiunto con AddFrame(), determinata per reverse engineering da una
+   traccia bus reale (vedi commento su gChkTarget). Va chiamata dopo il
+   corrispondente AddFrame() nella tabella. */
+void SetChkTarget(dword id, byte target)
+{
+  int i;
+  for (i = 0; i < gFrameCount; i = i + 1)
+  {
+    if (gFrameId[i] == id)
+    {
+      gChkTarget[i] = target;
+      return;
+    }
+  }
+}
+
+
+/* ============================================================================
+   GATEWAY CAN1 <-> CAN2
+   ============================================================================
+   NOTA: "this.dir == RX" e' fondamentale per evitare che il frame appena
+   ritrasmesso da questo stesso programma venga letto di nuovo come se fosse
+   in ingresso, generando un loop di inoltro CAN1->CAN2->CAN1->...
+   ============================================================================ */
+
+/* NOTA: un unico handler generico "on message *" che smista in base al
+   canale fisico (this.can). Non si usano ne' "on message CAN1::*" ne'
+   funzioni con parametri di tipo "message": in CAPL un oggetto message non
+   e' un tipo valido per parametri di funzione o variabili locali, quindi
+   tutta la logica di forwarding/error-injection resta dentro l'handler e
+   scrive sull'unico oggetto globale gTxMsg. */
+on message *
+{
+  int   i;
+  dword targetChannel;
+  int   fIdx;
+  byte  cByte, cStart, cLen;
+  byte  rawByte;
+  dword curVal, newVal, maxVal;
+
+  if (this.dir != RX)
+  {
+    return;
+  }
+
+  if (gInForward == 1)
+  {
+    return;
+  }
+
+  if (this.can == 1)
+  {
+    targetChannel = 2;
+  }
+  else if (this.can == 2)
+  {
+    targetChannel = 1;
+  }
+  else
+  {
+    return;
+  }
+
+  /* ---- 0) ANTI-ECO: un frame CONOSCIUTO non va ritrasmesso sul bus dove ha
+     gia' origine nativa (es. un frame di CAN2 rientrato per errore/eco su
+     CAN1 non deve essere rimandato su CAN2, dove il vero trasmettitore lo
+     sta gia' inviando: altrimenti si hanno due sorgenti per lo stesso ID e
+     il controller CAN reale va in errore/NACK/bus-off). I frame non presenti
+     in tabella vengono comunque sempre inoltrati (gateway generico). ---- */
+  fIdx = ResolveFrameIndexById(this.id);
+  if (fIdx >= 0 && gFrameOriginCan[fIdx] != this.can)
+  {
+    return;
+  }
+
+  /* ---- 1) TIMEOUT: il frame selezionato non viene inoltrato ---- */
+  if (gTimeoutActive == 1 && this.id == gTimeoutFrameId)
+  {
+    return;
+  }
+
+  gTxMsg.id  = this.id;
+  gTxMsg.dlc = this.dlc;
+  gTxMsg.dir = TX;
+  gTxMsg.can = targetChannel;
+
+  for (i = 0; i < this.dlc && i < 8; i = i + 1)
+  {
+    gTxMsg.byte(i) = this.byte(i);
+  }
+
+  /* ---- 2) DLC ERROR: forza un DLC errato in uscita ---- */
+  if (gDlcErrActive == 1 && this.id == gDlcErrFrameId)
+  {
+    gTxMsg.dlc = gDlcErrValue;
+  }
+
+  /* ---- 3) CHECKSUM ERROR: invalida il byte del segnale di checksum ---- */
+  if (gChkErrActive == 1 && this.id == gChkErrFrameId && gChkErrFrameIdx >= 0)
+  {
+    fIdx  = gChkErrFrameIdx;
+    cByte = gChkByteIdx[fIdx];
+    gTxMsg.byte(cByte) = (this.byte(cByte) + 1) & 0xFF;
+  }
+
+  /* ---- 4) COUNTER ERROR: freeze o jump del message counter ---- */
+  if (gCntErrActive == 1 && this.id == gCntErrFrameId && gCntErrFrameIdx >= 0)
+  {
+    fIdx   = gCntErrFrameIdx;
+    cByte  = gCntByteIdx[fIdx];
+    cStart = gCntBitStart[fIdx];
+    cLen   = gCntBitLen[fIdx];
+    maxVal = (1 << cLen) - 1;
+
+    rawByte = this.byte(cByte);
+    curVal  = ReadBits(rawByte, cStart, cLen);
+
+    if (gCntErrMode == 0)
+    {
+      /* freeze: congela il counter al primo valore osservato dopo l'attivazione */
+      if (gCntFrozenValid == 0)
+      {
+        gCntFrozenValue = curVal;
+        gCntFrozenValid = 1;
+      }
+      newVal = gCntFrozenValue;
+    }
+    else
+    {
+      /* jump: rompe la sequenza saltando 2 valori */
+      newVal = (curVal + 2) & maxVal;
+    }
+
+    gTxMsg.byte(cByte) = WriteBits(gTxMsg.byte(cByte), cStart, cLen, newVal);
+
+    /* Se per questo frame l'algoritmo di checksum e' stato validato
+       (vedi SetChkTarget in InitFrameTable), ricalcola un checksum
+       VALIDO per il counter appena alterato, cosi' il ricevitore
+       segnala solo l'errore di counter/freschezza e non anche un falso
+       errore di checksum come effetto collaterale. */
+    if (gChkBitLen[fIdx] > 0 && gChkTarget[fIdx] != 255)
+    {
+      RecomputeChecksum(fIdx);
+    }
+  }
+
+  gInForward = 1;
+  output(gTxMsg);
+  gInForward = 0;
+}
+
+dword ReadBits(byte b, byte startBit, byte len)
+{
+  dword mask;
+  mask = (1 << len) - 1;
+  return (b >> startBit) & mask;
+}
+
+byte WriteBits(byte b, byte startBit, byte len, dword value)
+{
+  dword mask;
+  mask = ((1 << len) - 1) << startBit;
+  return (b & ~mask) | ((value << startBit) & mask);
+}
+
+/* Somma tutti i nibble di gTxMsg (sui primi gTxMsg.dlc byte) tranne il
+   nibble di checksum a (exceptByte, exceptBitStart): serve per
+   ricalcolare il checksum a somma (vedi RecomputeChecksum). Assume che
+   il checksum occupi un intero nibble allineato (bitStart 0 oppure 4,
+   lunghezza 4), vero per tutti i frame con gChkTarget valido. */
+dword SumAllNibblesExceptChecksum(byte exceptByte, byte exceptBitStart)
+{
+  dword sum;
+  int   i;
+  byte  b;
+
+  sum = 0;
+  for (i = 0; i < gTxMsg.dlc && i < 8; i = i + 1)
+  {
+    b = gTxMsg.byte(i);
+    if (i == exceptByte)
+    {
+      if (exceptBitStart == 0)
+      {
+        sum = sum + ((b >> 4) & 0xF);
+      }
+      else
+      {
+        sum = sum + (b & 0xF);
+      }
+    }
+    else
+    {
+      sum = sum + ((b >> 4) & 0xF) + (b & 0xF);
+    }
+  }
+  return sum;
+}
+
+/* Ricalcola e scrive in gTxMsg un checksum VALIDO per il frame fIdx,
+   secondo l'algoritmo "somma a costante" determinato per reverse
+   engineering (vedi gChkTarget / SetChkTarget): la somma di tutti i
+   nibble del frame deve essere pari a gChkTarget[fIdx] modulo 16. */
+void RecomputeChecksum(int fIdx)
+{
+  byte cByte, cStart;
+  dword sumOther;
+  long  diff;
+  byte  newNibble;
+
+  cByte  = gChkByteIdx[fIdx];
+  cStart = gChkBitStart[fIdx];
+
+  sumOther = SumAllNibblesExceptChecksum(cByte, cStart);
+  diff = (long)gChkTarget[fIdx] - (long)(sumOther % 16);
+  if (diff < 0)
+  {
+    diff = diff + 16;
+  }
+  newNibble = diff;
+
+  gTxMsg.byte(cByte) = WriteBits(gTxMsg.byte(cByte), cStart, 4, newNibble);
+}
+
+
+/* ============================================================================
+   RISOLUZIONE FRAME da ID numerico
+   ============================================================================ */
+
+int ResolveFrameIndexById(dword id)
+{
+  int i;
+  for (i = 0; i < gFrameCount; i = i + 1)
+  {
+    if (gFrameId[i] == id)
+    {
+      return i;
+    }
+  }
+  return -1;
+}
+
+
+/* ============================================================================
+   INPUT UTENTE (System Variables) -> ATTIVAZIONE / DISATTIVAZIONE ERRORI
+   ============================================================================ */
+
+on sysvar_update sysvar::GatewaySim::ApplyTrigger
+{
+  int  fIdx;
+  int  errType;
+  long frameId;
+
+  frameId = @sysvar::GatewaySim::FrameId;
+  errType = @sysvar::GatewaySim::ErrorType;
+
+  fIdx = ResolveFrameIndexById(frameId);
+  if (fIdx < 0)
+  {
+    write("[Gateway] ERRORE: nessun frame configurato con ID 0x%X", frameId);
+    return;
+  }
+
+  switch (errType)
+  {
+    case 1: /* Timeout */
+      gTimeoutFrameId = frameId;
+      gTimeoutActive  = 1;
+      cancelTimer(gTimeoutTimer);
+      if (@sysvar::GatewaySim::TimeoutDuration_ms > 0)
+      {
+        setTimer(gTimeoutTimer, @sysvar::GatewaySim::TimeoutDuration_ms);
+      }
+      write("[Gateway] Timeout ATTIVO su %s (ID 0x%X)", gFrameName[fIdx], frameId);
+      break;
+
+    case 2: /* Checksum error */
+      if (gChkBitLen[fIdx] == 0)
+      {
+        write("[Gateway] ERRORE: %s (ID 0x%X) non ha un segnale di checksum configurato", gFrameName[fIdx], frameId);
+        return;
+      }
+      gChkErrFrameId  = frameId;
+      gChkErrFrameIdx = fIdx;
+      gChkErrActive   = 1;
+      write("[Gateway] Errore CHECKSUM attivo su %s (ID 0x%X)", gFrameName[fIdx], frameId);
+      break;
+
+    case 3: /* DLC error */
+      gDlcErrFrameId = frameId;
+      gDlcErrValue   = (byte)@sysvar::GatewaySim::DlcErrorValue;
+      gDlcErrActive  = 1;
+      write("[Gateway] Errore DLC attivo su %s (DLC forzato a %d)", gFrameName[fIdx], gDlcErrValue);
+      break;
+
+    case 4: /* Counter error - freeze */
+    case 5: /* Counter error - jump */
+      if (gCntBitLen[fIdx] == 0)
+      {
+        write("[Gateway] ERRORE: %s (ID 0x%X) non ha un segnale counter configurato", gFrameName[fIdx], frameId);
+        return;
+      }
+      gCntErrFrameId  = frameId;
+      gCntErrFrameIdx = fIdx;
+      gCntErrMode     = errType - 4; /* 0 = freeze, 1 = jump */
+      gCntFrozenValid = 0;
+      gCntErrActive   = 1;
+      if (gCntErrMode == 0)
+      {
+        write("[Gateway] Errore COUNTER (freeze) attivo su %s (ID 0x%X)", gFrameName[fIdx], frameId);
+      }
+      else
+      {
+        write("[Gateway] Errore COUNTER (jump) attivo su %s (ID 0x%X)", gFrameName[fIdx], frameId);
+      }
+      break;
+
+    default: /* 0 = Nessuno */
+      write("[Gateway] ErrorType = None, nessuna simulazione attivata");
+      break;
+  }
+}
+
+on sysvar_update sysvar::GatewaySim::ClearTrigger
+{
+  gTimeoutActive  = 0;
+  gTimeoutFrameId = -1;
+  cancelTimer(gTimeoutTimer);
+
+  gDlcErrActive  = 0;
+  gDlcErrFrameId = -1;
+
+  gChkErrActive   = 0;
+  gChkErrFrameId  = -1;
+  gChkErrFrameIdx = -1;
+
+  gCntErrActive   = 0;
+  gCntErrFrameId  = -1;
+  gCntErrFrameIdx = -1;
+  gCntFrozenValid = 0;
+
+  write("[Gateway] Simulazioni errore azzerate.");
+}
+
+on timer gTimeoutTimer
+{
+  gTimeoutActive  = 0;
+  gTimeoutFrameId = -1;
+  write("[Gateway] Timeout terminato, forwarding ripristinato.");
+}
