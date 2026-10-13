@@ -22,11 +22,11 @@ niso = nkeep = nonly = 0
 for r in f:
     if r["status"] in DEV:
         rs = ref.get((r["Signal Name"], r["Sw Variable"]), {}).get("status")
-        r["ref_status"] = rs
+        r["ref_1K136"] = rs
         if rs in SIMILAR:
             r["prev_status_iso"] = r["status"]; r["status"] = "ISO_1K136"; niso += 1
         elif rs in ("OK", "REMAP"):
-            r["only_in_test"] = True; nkeep += 1; nonly += 1
+            r["only_1K137"] = True; nkeep += 1; nonly += 1
         else:
             nkeep += 1
 json.dump(f, open(args.out, "w"), ensure_ascii=False, indent=1, default=str)

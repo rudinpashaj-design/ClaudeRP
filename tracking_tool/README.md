@@ -17,6 +17,23 @@ Se la misura e' splittata in zip, ricomporla/estrarla prima: serve il singolo `.
 ## 4. Excel di sintesi
     python export_excel.py --results results_iso.json --out Verifica_coppie.xlsx
 
+## 5. Grafici, Excel, Word e PowerPoint
+Una tantum: installare Node.js e, nella cartella `reporting/`, `npm install` (docx, pptxgenjs).
+
+    python make_reports.py --mf4 misura_1K137.mf4 --results results_iso.json \
+        --dbc-lookup dbc_lookup.json --label "Driving (SW 1K137)" --outdir output
+
+Produce in `output/`: `cases/*.png` (overlay CAN vs SW per ogni KO/N-D), `Verifica_coppie.xlsx`,
+`Rapporto_Inseguimento.docx`, `Presentazione_Inseguimento.pptx` (+ JSON intermedi e `stats.json`).
+Tutti i numeri nei documenti sono calcolati da `stats.json`: non c'e' nulla di hard-coded sulla misura.
+
+Script coinvolti (cartella `reporting/`): `gen_cases.py` (grafici + liste + statistiche), `report2.py` (Excel),
+`build_doc.js` (Word), `build_ppt.js` (PowerPoint).
+
+Limiti noti: le diciture «1K137» / «1K136» e il codice di stato `ISO_1K136` sono fissi nei testi; per altre versioni SW
+sostituirli con un find/replace. In `report2.py` il dizionario `CATEG_OVERRIDE` contiene classificazioni manuali di
+categoria divergenza per segnali specifici di questa lista: aggiornarlo se cambia la lista segnali.
+
 ## Regole implementate
 - Griglia di confronto al cycle time del frame CAN (da DBC `GenMsgCycleTime`), campionamento step-hold.
 - Tolleranza di ritardo ~20 ms: +-1 campione (frame >=20 ms), +-2 (10 ms), max 3.

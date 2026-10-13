@@ -1,0 +1,2 @@
+{ "name": "tracking-reporting", "private": true,
+  "dependencies": { "docx": "^9.5.0", "pptxgenjs": "^3.12.0" } }

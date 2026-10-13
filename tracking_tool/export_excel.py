@@ -8,7 +8,7 @@ ap.add_argument("--results", required=True)
 ap.add_argument("--out", default="Verifica_coppie.xlsx")
 args = ap.parse_args()
 res = json.load(open(args.results))
-cols = ["Signal Name", "Sw Variable", "status", "ref_status", "only_in_test", "frame_hex", "frame_cfg", "cycle_ms",
+cols = ["Signal Name", "Sw Variable", "status", "ref_1K136", "only_1K137", "frame_hex", "frame_cfg", "cycle_ms",
         "cmm_dir", "kind", "match_frac", "delay_samples", "remap_frac", "norm_err", "corr",
         "sig_varies", "sw_varies", "sig_min", "sig_max", "sw_min", "sw_max", "n_samples"]
 COL = {"OK": "C6EFCE", "REMAP": "C6EFCE", "CONFIG_EXCLUDED": "D6E4F0", "ISO_1K136": "D9EAD3",

@@ -2,3 +2,5 @@ asammdf
 canmatrix
 numpy
 openpyxl
+matplotlib
+Pillow
