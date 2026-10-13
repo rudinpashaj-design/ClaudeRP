@@ -1,0 +1,4 @@
+asammdf
+canmatrix
+numpy
+openpyxl
